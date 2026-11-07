@@ -10,7 +10,8 @@
 // imports exactly the bytes it hashed, as a module that has no location of its own:
 // a relative or package import fails when the extension loads, and so does a static
 // import by absolute file: URL (the one refusal the module system does not make, so
-// the loader makes it from the source). Only node: modules can be imported by name.
+// the loader makes it from the source; that check reads import statements, it catches a
+// mistake and is not a parser). Only node: modules can be imported by name.
 // What no loader can refuse stays outside the digest: a dynamic import() and any
 // other way an extension reads and runs other files. An extension that does that
 // owns the drift.

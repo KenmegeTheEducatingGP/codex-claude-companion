@@ -200,6 +200,11 @@ function parseTimestamp(receipt, label, value) {
 }
 
 function validateReceiptSemantics(receipt) {
+  // The request validator holds the same invariant for the same field: a job continues an earlier
+  // job, and a persisted receipt that names itself would be a cycle in the continuation history.
+  if (receipt.schemaVersion === 2 && receipt.continuesJobId === receipt.jobId) {
+    throw semanticsError("Bridge receipt continuesJobId must name an earlier job, not the receipt's own jobId.");
+  }
   const createdAt = parseTimestamp(receipt, "createdAt", receipt.createdAt);
   const deliveredAt = receipt.delivery.deliveredAt === null
     ? null

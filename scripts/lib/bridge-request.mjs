@@ -357,7 +357,7 @@ function resolveRoutingOption(options, model, effort) {
       : { source: "host", reason: "No routing rule or flag; the host configuration decides model and effort." };
   }
   if (typeof options.routing !== "object" || Array.isArray(options.routing)) {
-    fail("invalid_routing", "routing", "routing must be an object with source and reason.");
+    fail("invalid_routing", "routing", "routing must be an object with source, reason and, optionally, the warnings the routing resolver reported.");
   }
   return { ...options.routing };
 }

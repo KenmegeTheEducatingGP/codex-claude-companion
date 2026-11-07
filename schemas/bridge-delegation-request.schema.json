@@ -391,7 +391,22 @@
       "required": ["source", "reason"],
       "properties": {
         "source": { "enum": ["flag", "config", "extension", "host"] },
-        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "warnings": {
+          "description": "Routing adjustments made after live discovery, for example an effort the resolved model does not support.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "model", "effort", "supported"],
+            "properties": {
+              "code": { "const": "effort-unsupported" },
+              "model": { "type": ["string", "null"], "minLength": 1 },
+              "effort": { "type": "string", "minLength": 1 },
+              "supported": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          }
+        }
       }
     }
   }

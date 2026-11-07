@@ -18,9 +18,10 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
 - Every bridge schema is now a `oneOf` union on `schemaVersion`. The 1.2.0
   contract is kept unchanged as the v1 branch (a test pins its digest), and the
   v2 branch describes delegation in both directions: origin and worker families,
-  a verifier of the other family, routing provenance, and receipts with the
-  effective worker and verifier settings, the delivery route, the `queued`
-  state and a verifier integrity record.
+  a verifier of the other family, routing provenance (with the warnings the
+  routing resolver reports), and receipts with the effective worker and verifier
+  settings, the delivery route, the `queued` state and a verifier integrity
+  record. A request or a receipt that continues its own job is refused.
 - `scripts/lib/bridge-compat.mjs` reads every supported contract version into
   one internal layout, so 1.x jobs stay readable and finish under 1.x
   semantics.

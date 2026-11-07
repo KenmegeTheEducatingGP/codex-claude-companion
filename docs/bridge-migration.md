@@ -115,8 +115,10 @@ is now a `oneOf` union on `schemaVersion`:
   - an origin family (`codex` or `claude`) and a worker family;
   - the provider bound to the worker family;
   - a verifier that is always the other family;
-  - the task family, a `continuesJobId` and the routing provenance
-    (`flag`, `config`, `extension` or `host`, with a reason).
+  - the task family, a `continuesJobId` (an earlier job: a request or a receipt
+    that names its own job is refused) and the routing provenance (`flag`,
+    `config`, `extension` or `host`, with a reason and any warnings the routing
+    resolver reported).
 - A v2 result names `workerFamily` and `workerSessionId` (the Claude session id,
   a UUID, or the Codex thread id) instead of `claudeSessionId`, and may carry a
   `plan`. A completed result always names the session, so messaging and
@@ -215,7 +217,9 @@ overrides, field by field, the fields its answer names, and the other fields kee
 the config values; with neither a config entry nor an answer, the host decides
 and the bridge sends no model or effort. When live Codex model discovery is
 available, a routed effort that the model does not list in
-`supportedReasoningEfforts` is dropped, with an `effort-unsupported` warning. The
+`supportedReasoningEfforts` is dropped, with an `effort-unsupported` warning,
+which a request keeps in `routing.warnings` (a receipt's routing has the same
+field). The
 model checked is the routed one, else the Codex default model, for a job whose
 worker family is the rule's own, else the request's, else `defaults.workerFamily`.
 
@@ -225,9 +229,11 @@ An extension is a local module named by absolute path in `extensions`. Its
 default export is `{ apiVersion: 1, name, ...hooks }`. It is one self-contained
 ES module: it imports `node:` modules and nothing else, so one file holds all the
 code it runs (`import.meta.url` is not a file location). The loader refuses a
-relative, package or absolute `file:` URL import when the extension loads. A
-dynamic `import()` and any other way of reading and running other files are
-outside what a loader can refuse, and the digest does not cover them:
+relative, package or absolute `file:` URL import when the extension loads (the
+`file:` check reads the import statements in the source: it catches a mistake, it
+is not a parser). A dynamic `import()` and any other way of reading and running
+other files are outside what a loader can refuse, and the digest does not cover
+them:
 
 | Hook | Called with | Returns | On failure |
 |---|---|---|---|
