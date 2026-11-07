@@ -416,6 +416,53 @@ test("v2 routing from the host sends no model or effort", () => {
   }
 });
 
+// The routing resolver reports what it adjusted after live model discovery, for example an effort the
+// resolved model does not list. The request is the one record that reaches the broker, so it keeps those
+// warnings in the shape the receipt keeps, and a request and a receipt can carry the same routing.
+test("a v2 request records the routing warnings the resolver reports, in the receipt's own shape", () => {
+  const warning = { code: "effort-unsupported", model: "model-b", effort: "high", supported: ["medium"] };
+  for (const warnings of [[], [warning], [warning, { ...warning, model: null }]]) {
+    const request = structuredClone(v2Request());
+    request.routing = { source: "config", reason: "config routing.review", warnings };
+    accepts(validateBridgeRequestContract, request, `a request routing with ${warnings.length} warning(s)`);
+    const receipt = structuredClone(v2Receipt());
+    receipt.routing = structuredClone(request.routing);
+    accepts(validateBridgeReceiptContract, receipt, "the receipt keeps the same routing");
+  }
+  for (const [label, bad] of [
+    ["an unknown code", { ...warning, code: "model-unsupported" }],
+    ["an extra property", { ...warning, note: "x" }],
+    ["a missing supported list", { code: warning.code, model: warning.model, effort: warning.effort }],
+    ["an empty effort", { ...warning, effort: "" }]
+  ]) {
+    const request = structuredClone(v2Request());
+    request.routing = { source: "config", reason: "config routing.review", warnings: [bad] };
+    rejects(validateBridgeRequestContract, request, undefined, label);
+  }
+  const notAList = structuredClone(v2Request());
+  notAList.routing = { source: "config", reason: "config routing.review", warnings: warning };
+  rejects(validateBridgeRequestContract, notAList, undefined, "warnings is a list");
+  // Each contract describes a warning once; the two descriptions must not drift apart.
+  assert.deepEqual(
+    readSchema("request").$defs.v2Routing.properties.warnings,
+    readSchema("receipt").$defs.v2Routing.properties.warnings
+  );
+});
+
+test("a v2 receipt names an earlier job as the one it continues, as the request does", () => {
+  const continuing = structuredClone(v2Receipt());
+  continuing.continuesJobId = OTHER_JOB_ID;
+  accepts(validateBridgeReceiptContract, continuing, "a receipt may continue an earlier job");
+  accepts(validateBridgeReceiptContract, structuredClone(v2Receipt()), "and null means it continues none");
+  const selfContinuation = structuredClone(v2Receipt());
+  selfContinuation.continuesJobId = JOB_ID;
+  assert.throws(
+    () => validateBridgeReceiptContract(selfContinuation),
+    (error) => error instanceof BridgeContractValidationError && error.phase === "semantics" && /continuesJobId/.test(error.message),
+    "a receipt cannot continue its own job: a persisted cycle would loop any code that follows the chain"
+  );
+});
+
 test("v2 origin and task fields are validated, including continuation identity", () => {
   for (const [label, mutate] of [
     ["claude origin with a non-uuid session id", (request) => { request.origin.family = "claude"; request.origin.threadId = "thread-1"; }],

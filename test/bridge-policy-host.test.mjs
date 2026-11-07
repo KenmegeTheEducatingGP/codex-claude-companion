@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { DEFAULT_BRIDGE_CONFIG, resolveRouting } from "../scripts/lib/bridge-config.mjs";
 import { validateBridgeRequestContract } from "../scripts/lib/bridge-contracts.mjs";
 import * as bridgePolicy from "../scripts/lib/bridge-policy.mjs";
 import { buildBridgeRequest } from "../scripts/lib/bridge-request.mjs";
@@ -55,6 +56,27 @@ function v2Options(overrides = {}) {
 function requestError(code, field) {
   return (error) => error.name === "BridgeRequestError" && error.code === code && (field === undefined || error.field === field);
 }
+
+// The resolver is the documented source of a v2 request's family, model, effort and routing. What it
+// adjusted after live discovery (an effort the model does not list) must survive into the request.
+test("a v2 request built from the routing resolver keeps the warnings it reports", async () => {
+  const config = { ...DEFAULT_BRIDGE_CONFIG, routing: { review: { family: "codex", model: "model-b", effort: "high" } } };
+  const available = {
+    codex: { models: [{ id: "model-b", model: "model-b", hidden: false, isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "" }] }] }
+  };
+  const resolved = await resolveRouting(config, [], { request: null, taskFamily: "review", available });
+  assert.equal(resolved.effort, null, "the resolver dropped the effort the model does not list");
+  assert.equal(resolved.warnings.length, 1);
+  const request = buildBridgeRequest(v2Options({
+    workerFamily: resolved.family,
+    model: resolved.model,
+    effort: resolved.effort,
+    taskFamily: "review",
+    routing: { source: resolved.source, reason: resolved.reason, warnings: structuredClone(resolved.warnings) }
+  }));
+  assert.deepEqual(request.routing, { source: "config", reason: "config routing.review", warnings: resolved.warnings });
+  assert.ok(Object.isFrozen(request.routing) && Object.isFrozen(request.routing.warnings), "the request is immutable, warnings included");
+});
 
 test("the host profile produces empty worker args and empty worker params", () => {
   assert.deepEqual(Object.keys(BRIDGE_PROFILES), ["host", "review-readonly", "standard", "trusted-autonomous", "sandbox-autonomous"]);
