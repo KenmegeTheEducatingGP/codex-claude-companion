@@ -14,7 +14,7 @@ import {
   resolveBridgeStateRoot
 } from "./bridge-state.mjs";
 import { validateBridgeMessageOperationContract, validateBridgeReceiptContract } from "./bridge-contracts.mjs";
-import { ORIGIN_BUSY } from "./bridge-delivery.mjs";
+import { ORIGIN_BUSY, OUTPUT_FAILED } from "./bridge-delivery.mjs";
 import { createBridgeReceipt, updateBridgeDeliveryReceipt, updateBridgeVerificationReceipt, updateBridgeWorkerReceipt } from "./bridge-receipt.mjs";
 
 export const BRIDGE_MESSAGE_QUOTAS = Object.freeze({
@@ -926,15 +926,20 @@ export function acknowledgeInboxDelivery(origin, inboxClaimId, deliveryClaimId, 
   });
 }
 
-// Returns a claimed inbox item to the queue after an origin-busy attempt. The
-// origin is in use, not failing, so the attempt count and quota are unchanged.
+// Returns a claimed inbox item to the queue after an attempt that did not deliver it for a reason
+// that is not the delivery's failure: the origin is in use (origin-busy), or the origin's own
+// command could not write its output (origin-output-failed). Neither spends the attempt count or
+// the quota, and the reason is recorded as the last error.
+const REQUEUE_REASONS = new Set([ORIGIN_BUSY, OUTPUT_FAILED]);
 export function requeueInboxDelivery(origin, inboxClaimId, deliveryClaimId, metadata, options = {}) {
-  if (metadata?.reason !== ORIGIN_BUSY) throw new Error("Only an origin-busy inbox attempt can be requeued without spending quota");
+  if (!REQUEUE_REASONS.has(metadata?.reason)) {
+    throw new Error("Only an origin-busy or origin-output-failed inbox attempt can be requeued without spending quota");
+  }
   return mutateInboxClaim(origin, inboxClaimId, deliveryClaimId, metadata, options, (current) => {
     if (current.state !== "inbox_claimed") throw new Error("Inbox item is not claimed");
     current.state = "inbox";
     current.inboxClaim = null;
-    current.lastError = ORIGIN_BUSY;
+    current.lastError = metadata.reason;
     return writeDelivery(metadata.jobId, current, options);
   });
 }

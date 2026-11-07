@@ -218,7 +218,12 @@ test("a busy origin with no waiter is queued as origin-busy without spending fai
   assert.equal(delivered.route, "waiter");
   assert.equal(delivered.attempts, 1);
   assert.equal(readReceipt(job.jobId, job.brokerOptions).delivery.state, "acknowledged");
-  assert.equal(JSON.parse(waited.text).receipt.delivery.state, "acknowledged");
+  // The delivering command writes its output while the delivery is still claimed: the
+  // acknowledgement is recorded only after that write succeeded (P1), so the receipt it
+  // prints carries the v1 enum's in-flight value. The durable state, asserted above, is
+  // "acknowledged"; the printed value is not a second source of truth.
+  assert.equal(JSON.parse(waited.text).receipt.delivery.state, "pending",
+    "the printed receipt is taken before the write is confirmed, so the delivery is still pending in it");
 });
 
 test("with the origin's wait live, the broker hands delivery to that waiter and never resumes the busy origin (D2, A13)", async () => {
@@ -242,7 +247,10 @@ test("with the origin's wait live, the broker hands delivery to that waiter and 
   assert.equal(delivered.state, "acknowledged");
   assert.equal(delivered.route, "waiter");
   assert.equal(delivered.attempts, 1, `a stale waiter claim was re-claimed: attempts=${delivered.attempts}`);
-  assert.equal(JSON.parse(waited.text).receipt.delivery.state, "acknowledged");
+  // As above: the waiter's output is written while its claim is held, and the claim is
+  // acknowledged after the write, so the printed receipt shows the in-flight value.
+  assert.equal(JSON.parse(waited.text).receipt.delivery.state, "pending",
+    "the printed receipt is taken before the write is confirmed, so the delivery is still pending in it");
 });
 
 test("an observer's wait reports but never acknowledges a queued result (guard, green at base)", async () => {
@@ -534,6 +542,15 @@ const refusedWrite = () => {
   throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
 };
 
+// The result goes back to the inbox under its own reason and spends nothing: the write failed,
+// the delivery did not.
+function assertRequeuedAfterFailedWrite(job, before) {
+  const requeued = readDelivery(job.jobId, job.brokerOptions);
+  assert.equal(requeued.state, "inbox", "the output was not written, so the queued result must be deliverable again");
+  assert.equal(requeued.lastError, "origin-output-failed", "a failed write is recorded under its own reason");
+  assert.equal(requeued.attempts, before.attempts, "a failed write is not the delivery's failure and spends no inbox quota");
+}
+
 test("an origin command acknowledges a queued result only after it wrote it (D2, P1)", async () => {
   const thread = "thread-live-origin-l";
   const { root, done, running } = await threadWithQueuedResult("ccb-live-origin-order-", thread);
@@ -553,13 +570,13 @@ test("a failed write leaves the queued result queued, and the next origin comman
   const fixture = await threadWithQueuedResult("ccb-live-origin-writefail-", thread);
   const { root, done, running } = fixture;
   const cli = cliHarness();
+  const before = readDelivery(done.jobId, done.brokerOptions);
 
   const failed = await cli.run("status", [running.jobId, "--json", "--state-dir", root.stateRoot], {
     codexThreadId: thread, write: refusedWrite
   });
   assert.match(failed.error?.message ?? "", /write EPIPE/, "the command reports the failed write");
-  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
-    "the output was not written, so the queued result must be deliverable again");
+  assertRequeuedAfterFailedWrite(done, before);
 
   await assertNextOriginCommandDelivers(cli, fixture, thread);
 });
@@ -631,6 +648,7 @@ test("a delegate whose write fails leaves the queued result queued (D2, P1)", as
     originAdapter: busyOrigin(thread).adapter
   });
   assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox");
+  const before = readDelivery(done.jobId, done.brokerOptions);
 
   const delegated = await cliHarness().run("delegate", [
     "--prompt", "second task", "--verify-command", JSON.stringify([process.execPath, "-e", "0"]),
@@ -638,8 +656,7 @@ test("a delegate whose write fails leaves the queued result queued (D2, P1)", as
     "--tmux", process.execPath, "--claude", process.execPath, "--codex", process.execPath, "--json"
   ], { write: refusedWrite });
   assert.match(delegated.error?.message ?? "", /write EPIPE/, "the delegate reports the failed write");
-  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
-    "the output was not written, so the queued result must be deliverable again");
+  assertRequeuedAfterFailedWrite(done, before);
 });
 
 // The real thing: process.stdout reports a failed write through the write callback,
@@ -666,6 +683,7 @@ test("a closed stdout leaves the queued result queued (D2, P1)", async (t) => {
   const thread = "thread-live-origin-r";
   const fixture = await threadWithQueuedResult("ccb-live-origin-epipe-", thread);
   const { root, done, running } = fixture;
+  const before = readDelivery(done.jobId, done.brokerOptions);
   const child = spawn(process.execPath, ["--input-type=module", "-e", STATUS_CHILD, root.stateRoot, running.jobId, thread], {
     stdio: ["pipe", "pipe", "pipe"]
   });
@@ -676,9 +694,9 @@ test("a closed stdout leaves the queued result queued (D2, P1)", async (t) => {
   child.stdin.end("go\n");
   const exit = await ended;
 
-  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
-    `the child could not write its output, so the queued result must stay deliverable (exit ${JSON.stringify(exit)}): ${diagnostics}`);
-  assert.match(diagnostics, /STATUS-FAILED EPIPE/, "the command reports the failed write");
+  assert.match(diagnostics, /STATUS-FAILED EPIPE/,
+    `the command reports the failed write (exit ${JSON.stringify(exit)}): ${diagnostics}`);
+  assertRequeuedAfterFailedWrite(done, before);
 
   await assertNextOriginCommandDelivers(cliHarness(), fixture, thread);
 });
