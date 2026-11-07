@@ -10,8 +10,9 @@
 // imports exactly the bytes it hashed, as a module that has no location of its own:
 // a relative or package import fails when the extension loads, and so does a static
 // import by absolute file: URL (the one refusal the module system does not make, so
-// the loader makes it from the source; that check reads import statements, it catches a
-// mistake and is not a parser). Only node: modules can be imported by name.
+// the loader makes it from the source: it tokenizes the module, so import-like text in
+// a string, a template or a comment is skipped and a comment inside an import does not
+// hide it; see bridge-module-imports.mjs). Only node: modules can be imported by name.
 // What no loader can refuse stays outside the digest: a dynamic import() and any
 // other way an extension reads and runs other files. An extension that does that
 // owns the drift.
@@ -21,6 +22,8 @@ import fs from "node:fs";
 import { isBuiltin } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+import { staticImportSpecifiers } from "./bridge-module-imports.mjs";
 
 export const BRIDGE_EXTENSION_API_VERSION = 1;
 
@@ -71,15 +74,10 @@ function validateDefinition(file, definition) {
   }
 }
 
-// The specifiers of an extension's static imports and re-exports, in source order. It reads
-// statement starts, so a commented-out import and import-like text inside a string are skipped, and
-// a dynamic import() is not listed. It words messages, and it backs the one refusal the module
-// system does not make itself (an absolute file: URL, see loadOne).
-const STATIC_IMPORT = /(?:^|[;{}\n])[ \t]*(?:import|export)\b(?:[^"'`;]*?\bfrom\b)?[ \t\r\n]*(["'])([^"'\r\n]+)\1/g;
-
-function staticImportSpecifiers(source) {
-  return [...source.toString("utf8").matchAll(STATIC_IMPORT)].map((match) => match[2]);
-}
+// staticImportSpecifiers lists an extension's static imports and re-exports, in source order, from
+// the module's tokens: a commented-out import and import-like text inside a string or a template
+// are skipped, and a dynamic import() is not listed. It words messages, and it backs the one
+// refusal the module system does not make itself (an absolute file: URL, see loadOne).
 
 function selfContainedViolation(file, specifier) {
   return `Extension ${file} imports ${JSON.stringify(specifier)}; ` +

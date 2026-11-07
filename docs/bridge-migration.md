@@ -128,7 +128,9 @@ is now a `oneOf` union on `schemaVersion`:
   - the effective worker and verifier settings as each reported them: `null`
     until the worker reports, and for a worker that failed or was cancelled
     first, but always recorded once the worker completed or the verification
-    passed or failed (a member is `null` only where that family reports none);
+    passed or failed (a member is `null` only where that family reports none).
+    A verification that is pending or was skipped ran no verifier, so its
+    settings and its integrity record are both `null`;
   - the delivery route (`waiter`, `origin` or `inbox`) and the `queued` state;
   - a verifier integrity record: a passed verification requires
     `integrity.mutated: false`;
@@ -230,10 +232,11 @@ default export is `{ apiVersion: 1, name, ...hooks }`. It is one self-contained
 ES module: it imports `node:` modules and nothing else, so one file holds all the
 code it runs (`import.meta.url` is not a file location). The loader refuses a
 relative, package or absolute `file:` URL import when the extension loads (the
-`file:` check reads the import statements in the source: it catches a mistake, it
-is not a parser). A dynamic `import()` and any other way of reading and running
-other files are outside what a loader can refuse, and the digest does not cover
-them:
+`file:` check tokenizes the module: import-like text in a string, a template or a
+comment is skipped, and a comment inside an import does not hide it; it does not
+parse the module, so it does not check that the source is valid). A dynamic
+`import()` and any other way of reading and running other files are outside what
+a loader can refuse, and the digest does not cover them:
 
 | Hook | Called with | Returns | On failure |
 |---|---|---|---|

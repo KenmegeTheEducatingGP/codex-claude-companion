@@ -36,10 +36,13 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   runs exactly the bytes it hashes and refuses a relative, package or absolute
   `file:` URL import when it loads, with a message that names the import on every
   supported Node, so the digest a recovered job compares covers the module that
-  runs. A dynamic `import()` is outside what a loader can refuse.
+  runs. The loader tokenizes the module to find imports, so import-like text in a
+  string, a template or a comment is not one and a comment inside an import does
+  not hide it. A dynamic `import()` is outside what a loader can refuse.
 - A v2 result requires the worker's native session once the job completed (a
   UUID for Claude), and a v2 receipt requires the effective settings once the
-  worker completed or the verification finished. The extension digests a
+  worker completed or the verification finished; a pending or skipped
+  verification ran no verifier and records none. The extension digests a
   receipt keeps are name and sha256 only; the broker's recovery record keeps the
   path. A routing rule that leaves the family to the host has its Codex effort
   checked against `defaults.workerFamily`.
