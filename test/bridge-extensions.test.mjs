@@ -163,3 +163,12 @@ test("observers are best effort: errors are reported, never thrown", async () =>
   assert.equal(globalThis.__bridgeObserved, "started");
   await assert.doesNotReject(notifyExtensionObservers(extensions, { type: "completed" }));
 });
+
+test("an observer that never settles is reported as timed out and does not hold the job", async () => {
+  const seen = [];
+  const extensions = await loadBridgeExtensions([
+    writeExtension(`export default { apiVersion: 1, name: "hangs", observe() { return new Promise(() => {}); } };`)
+  ]);
+  await notifyExtensionObservers(extensions, { type: "started" }, { timeoutMs: 50, onError: (error, extension) => seen.push(`${extension}: ${error.message}`) });
+  assert.deepEqual(seen, ["hangs: observe did not finish within 50 ms"]);
+});
