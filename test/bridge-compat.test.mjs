@@ -239,7 +239,11 @@ test("toInternalResult maps claudeSessionId to workerSessionId and every v1 resu
 });
 
 test("property: arbitrary schema-valid v1 results round-trip", () => {
-  const item = fc.record({ title: fc.string({ minLength: 1, maxLength: 20 }), detail: fc.string({ minLength: 1, maxLength: 40 }) });
+  // Persisted results are parsed JSON, so their objects always have Object.prototype.
+  const item = fc.record(
+    { title: fc.string({ minLength: 1, maxLength: 20 }), detail: fc.string({ minLength: 1, maxLength: 40 }) },
+    { noNullPrototype: true }
+  );
   fc.assert(fc.property(
     fc.constantFrom("completed", "failed", "cancelled"), fc.string({ maxLength: 60 }),
     fc.array(fc.string({ minLength: 1, maxLength: 30 }), { maxLength: 5 }), fc.array(item, { maxLength: 3 }),
