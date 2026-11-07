@@ -451,3 +451,73 @@ test("the origin's wait for a queued job reports its result once, in plain text 
   assert.equal(payload.queuedResults, undefined,
     "the payload already carries this job's result, so queuedResults must not repeat it");
 });
+
+// The inbox is claimed across the whole state root, but the CLI looks for a
+// thread's queued origins only among the newest 64 jobs (its auto-recovery scan
+// window). An origin command that names an older job must still deliver that
+// job's result, so the job it names always counts.
+const JOBS_NEWER_THAN_THE_SCAN_WINDOW = 65;
+
+async function queuedResultsBehindNewerJobs(prefix, queuedJobs) {
+  const root = createRoot(prefix);
+  const jobs = [];
+  for (const { jobId, thread } of queuedJobs) {
+    const job = createVerifiedJob(prefix, jobId, thread, { root });
+    const queued = await deliverBridgeResult({
+      result: job.result,
+      receipt: readReceipt(job.jobId, job.brokerOptions),
+      origin: job.origin,
+      stateOperations: job.coordination,
+      originAdapter: busyOrigin(thread).adapter
+    });
+    assert.equal(queued.state, "queued");
+    assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "inbox");
+    jobs.push(job);
+  }
+  // Newer jobs of another thread, one workspace each, created after the queued ones.
+  for (let index = 1; index <= JOBS_NEWER_THAN_THE_SCAN_WINDOW; index += 1) {
+    const workspace = path.join(root.base, `workspace-${index}`);
+    fs.mkdirSync(workspace);
+    createVerifiedJob(prefix, `ccb_00000000000000000000D2B${String(index).padStart(3, "0")}`, "thread-live-origin-bystander", {
+      root: { ...root, workspace }, complete: false
+    });
+  }
+  const newest = fs.readdirSync(path.join(root.stateRoot, "jobs")).sort().reverse().slice(0, 64);
+  for (const job of jobs) {
+    assert.ok(!newest.includes(job.jobId), `${job.jobId} must lie outside the 64 newest jobs for this test to mean anything`);
+  }
+  return { root, jobs };
+}
+
+test("an origin's status of a queued job older than the newest 64 delivers its result (D2, A13)", async () => {
+  const { root, jobs: [asJson, asText] } = await queuedResultsBehindNewerJobs("ccb-live-origin-window-", [
+    { jobId: "ccb_00000000000000000000D2A001", thread: "thread-live-origin-j" },
+    { jobId: "ccb_00000000000000000000D2A002", thread: "thread-live-origin-k" }
+  ]);
+
+  // Guard, green at base: a caller that is not the job's origin only observes.
+  const observed = await cliHarness().run("status", [asJson.jobId, "--json", "--state-dir", root.stateRoot], {
+    codexThreadId: "thread-observer"
+  });
+  assert.equal(observed.error, null, observed.error?.message);
+  assert.equal(readDelivery(asJson.jobId, asJson.brokerOptions).state, "inbox", "an observer's status claims nothing");
+
+  const asked = await cliHarness().run("status", [asJson.jobId, "--json", "--state-dir", root.stateRoot], {
+    codexThreadId: asJson.threadId
+  });
+  assert.equal(asked.error, null, asked.error?.message);
+  assert.equal(JSON.parse(asked.text).result.summary, "Implemented and verified the change.");
+  const delivered = readDelivery(asJson.jobId, asJson.brokerOptions);
+  assert.deepEqual({ state: delivered.state, route: delivered.route }, { state: "acknowledged", route: "waiter" },
+    "the origin asked about this exact job, so its status must deliver the queued result");
+  assert.equal(readDelivery(asText.jobId, asText.brokerOptions).state, "inbox",
+    "another thread's queued result is not this command's to deliver");
+
+  const askedPlain = await cliHarness().run("status", [asText.jobId, "--state-dir", root.stateRoot], {
+    codexThreadId: asText.threadId
+  });
+  assert.equal(askedPlain.error, null, askedPlain.error?.message);
+  assert.equal(countOf(askedPlain.text, "Implemented and verified the change."), 1,
+    `the status that delivers the result must print it (once); its plain-text output was:\n${askedPlain.text}`);
+  assert.equal(readDelivery(asText.jobId, asText.brokerOptions).state, "acknowledged");
+});
