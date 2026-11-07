@@ -165,22 +165,15 @@ function deepFreeze(value) {
   return value;
 }
 
-export function buildBridgeRequest(options = {}) {
-  if (!options || typeof options !== "object" || Array.isArray(options)) {
-    fail("invalid_options", "options", "Bridge request options must be an object.");
-  }
-
-  const permittedRoot = options.permittedRoot === undefined || options.permittedRoot === null
+function resolvePermittedRoot(options) {
+  return options.permittedRoot === undefined || options.permittedRoot === null
     ? null
     : canonicalPath(options.permittedRoot, "permittedRoot", "directory");
-  const requestedWorkspacePath = requiredString(options.workspacePath, "workspacePath");
-  let policy;
+}
+
+function resolvePolicyOrFail(policyOptions) {
   try {
-    policy = resolveBridgePolicy({
-      profile: requiredString(options.profile, "profile"),
-      workspacePath: requestedWorkspacePath,
-      permittedRoot: permittedRoot ?? undefined
-    });
+    return resolveBridgePolicy(policyOptions);
   } catch (cause) {
     if (cause instanceof BridgeRequestError) throw cause;
     if (cause.message.includes("outside permittedRoot")) {
@@ -188,7 +181,9 @@ export function buildBridgeRequest(options = {}) {
     }
     fail("policy_invalid", "profile", cause.message, { cause });
   }
+}
 
+function resolveExecutionOptions(options) {
   const executor = requiredString(options.executor, "executor");
   if (!ALLOWED_EXECUTORS.has(executor)) fail("invalid_executor", "executor", `Unknown executor "${executor}".`);
   const workspaceMode = requiredString(options.workspace ?? options.workspaceMode, "workspace");
@@ -200,6 +195,45 @@ export function buildBridgeRequest(options = {}) {
   }
   const acceptance = asList(options.acceptance, "acceptance");
   if (acceptance.length === 0) fail("acceptance_required", "acceptance", "acceptance must contain at least one criterion.");
+  return { executor, workspaceMode, timeoutSeconds, acceptance };
+}
+
+function resolveOriginDirectories(options, permittedRoot) {
+  const canonicalCwd = constrainPath(canonicalPath(options.cwd, "cwd", "directory"), permittedRoot, "cwd");
+  const canonicalRepoRoot = constrainPath(canonicalPath(options.repoRoot, "repoRoot", "directory"), permittedRoot, "repoRoot");
+  const mcpConfigInput = options.mcpConfigs ?? options.mcpConfigPaths;
+  if (asList(mcpConfigInput, "mcpConfigs").some((entry) => entry.startsWith("{"))) {
+    fail("inline_mcp_config_forbidden", "mcpConfigs", "Inline MCP configuration is not persisted in bridge requests; provide configuration file paths.");
+  }
+  return { canonicalCwd, canonicalRepoRoot, mcpConfigInput };
+}
+
+function validateOrFail(request) {
+  try {
+    validateBridgeRequestContract(request);
+  } catch (cause) {
+    fail("contract_invalid", "request", cause.message, { cause });
+  }
+  return deepFreeze(request);
+}
+
+export function buildBridgeRequest(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    fail("invalid_options", "options", "Bridge request options must be an object.");
+  }
+  return buildV1Request(options);
+}
+
+function buildV1Request(options) {
+  const permittedRoot = resolvePermittedRoot(options);
+  const requestedWorkspacePath = requiredString(options.workspacePath, "workspacePath");
+  const policy = resolvePolicyOrFail({
+    profile: requiredString(options.profile, "profile"),
+    workspacePath: requestedWorkspacePath,
+    permittedRoot: permittedRoot ?? undefined
+  });
+
+  const { executor, workspaceMode, timeoutSeconds, acceptance } = resolveExecutionOptions(options);
   const jobId = generateJobId();
   const agentSelection = resolveAgentSelection(options, permittedRoot);
   const settingSources = resolveSettingSources(options.settingSources);
@@ -208,12 +242,7 @@ export function buildBridgeRequest(options = {}) {
     settingSourcesArg,
     ...policy.claudeArgs.filter((argument) => argument !== "--setting-sources=")
   ];
-  const canonicalCwd = constrainPath(canonicalPath(options.cwd, "cwd", "directory"), permittedRoot, "cwd");
-  const canonicalRepoRoot = constrainPath(canonicalPath(options.repoRoot, "repoRoot", "directory"), permittedRoot, "repoRoot");
-  const mcpConfigInput = options.mcpConfigs ?? options.mcpConfigPaths;
-  if (asList(mcpConfigInput, "mcpConfigs").some((entry) => entry.startsWith("{"))) {
-    fail("inline_mcp_config_forbidden", "mcpConfigs", "Inline MCP configuration is not persisted in bridge requests; provide configuration file paths.");
-  }
+  const { canonicalCwd, canonicalRepoRoot, mcpConfigInput } = resolveOriginDirectories(options, permittedRoot);
 
   const request = {
     schemaVersion: 1,
@@ -256,10 +285,5 @@ export function buildBridgeRequest(options = {}) {
     }
   };
 
-  try {
-    validateBridgeRequestContract(request);
-  } catch (cause) {
-    fail("contract_invalid", "request", cause.message, { cause });
-  }
-  return deepFreeze(request);
+  return validateOrFail(request);
 }
