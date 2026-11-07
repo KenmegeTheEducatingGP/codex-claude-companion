@@ -6,6 +6,22 @@ import {
 } from "./bridge-contracts.mjs";
 
 const JOB_ID_PATTERN = /^ccb_[0-9A-HJKMNP-TV-Z]{26}$/;
+// The delivery error recorded when the origin thread is in use. It never spends
+// the inbox failure quota.
+export const ORIGIN_BUSY = "origin-busy";
+// The delivery error recorded when the origin's own command claimed a queued result but could not
+// write its output (a closed pipe, a full disk). The result was not delivered and the inbox failure
+// quota is not spent.
+export const OUTPUT_FAILED = "origin-output-failed";
+const INVALID_REQUEST_RPC_CODE = -32600;
+
+// A Codex thread admits one writer process. While the origin session runs (for
+// example inside `codex-claude wait`), a resume from another process fails with
+// "thread <id> already has an active writer". The origin is busy, not broken.
+export function isOriginBusyError(error) {
+  return error?.rpcCode === INVALID_REQUEST_RPC_CODE &&
+    /\balready has an active writer\b/.test(String(error?.message ?? ""));
+}
 
 function assertOrigin(origin) {
   if (!origin || typeof origin !== "object" || typeof origin.codexThreadId !== "string" ||
@@ -76,6 +92,22 @@ function conciseOriginPrompt(envelope) {
   ].join("\n")).slice(0, 1_200);
 }
 
+// A terminal result as the origin receives it, whichever route delivers it:
+// the concise text an origin resume carries and a queued inbox item stores.
+export function describeBridgeResult({ result, receipt, origin }) {
+  validateBridgeResultContract(result);
+  validateBridgeReceiptContract(receipt);
+  assertOrigin(origin);
+  if (result.jobId !== receipt.jobId) throw new Error("result and receipt job ids do not match");
+  const envelope = buildEnvelope(result, receipt, origin);
+  return Object.freeze({
+    jobId: result.jobId,
+    workerCompleted: envelope.workerCompleted,
+    verified: envelope.verified,
+    prompt: conciseOriginPrompt(envelope)
+  });
+}
+
 export function createCodexOriginAdapter(options = {}) {
   return async ({ cwd, resumeThreadId, prompt }) => {
     const runTurn = options.runTurn ?? (await import("../../plugins/codex/scripts/lib/codex.mjs")).runAppServerTurn;
@@ -107,9 +139,15 @@ export async function deliverBridgeResult(options) {
   const claim = await stateOperations.claimDelivery(result.jobId, { route, origin: structuredClone(origin) });
   if (!claim?.accepted) {
     if (["inbox", "inbox_claimed"].includes(claim?.state)) {
-      return { state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId };
+      return {
+        state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId,
+        ...(claim.lastError === ORIGIN_BUSY ? { reason: ORIGIN_BUSY } : {})
+      };
     }
     if (claim?.state === "claimed") {
+      if (claim.route === "waiter" && route !== "waiter") {
+        return { state: "awaiting-waiter", route: "waiter", jobId: result.jobId };
+      }
       return { state: "deferred", route, jobId: result.jobId };
     }
     if (claim?.state === "failed") {
@@ -119,6 +157,11 @@ export async function deliverBridgeResult(options) {
   }
   if (typeof claim.claimId !== "string" || claim.claimId.length === 0) {
     throw new Error("broker returned an invalid durable delivery claim");
+  }
+  if (claim.route === "waiter" && route !== "waiter") {
+    // The origin's own `wait` holds the waiter lease, so the claim is its to
+    // acknowledge as it prints the result. Resuming the origin would fail.
+    return { state: "awaiting-waiter", route: "waiter", jobId: result.jobId };
   }
   const envelope = buildEnvelope(result, receipt, origin);
   try {
@@ -139,6 +182,7 @@ export async function deliverBridgeResult(options) {
       throw new Error("delivery failed and no broker-owned durable inbox operation is available", { cause: error });
     }
     const queuedAt = (options.now ?? (() => new Date()))().toISOString();
+    const originBusy = route === "origin" && isOriginBusyError(error);
     await stateOperations.failDeliveryToInbox(result.jobId, claim.claimId, {
       schemaVersion: 1,
       jobId: result.jobId,
@@ -148,17 +192,80 @@ export async function deliverBridgeResult(options) {
       workerCompleted: result.status === "completed",
       verified: envelope.verified,
       failedRoute: route,
-      error: redactText(error?.message ?? error).slice(0, 320),
+      error: originBusy ? ORIGIN_BUSY : redactText(error?.message ?? error).slice(0, 320),
       attempt: 0,
       queuedAt
     });
-    return { state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId };
+    return {
+      state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId,
+      ...(originBusy ? { reason: ORIGIN_BUSY } : {})
+    };
   }
   const acknowledgedAt = (options.now ?? (() => new Date()))().toISOString();
   await stateOperations.acknowledgeDelivery(result.jobId, claim.claimId, {
     route, deliveredAt: acknowledgedAt, acknowledgedAt
   });
   return { state: "acknowledged", route, jobId: result.jobId };
+}
+
+// Claims the oldest queued result for `origin`, or returns null when none is claimable.
+async function claimQueuedItem(origin, stateOperations) {
+  const claimed = await stateOperations.claimInbox(structuredClone(origin));
+  if (claimed === null) return null;
+  const { inboxClaimId, deliveryClaimId, item } = claimed ?? {};
+  if (typeof inboxClaimId !== "string" || typeof deliveryClaimId !== "string" ||
+      !JOB_ID_PATTERN.test(item?.jobId ?? "") || !sameOrigin(item.origin, origin)) {
+    throw new Error("broker returned an invalid or cross-origin inbox claim");
+  }
+  return { inboxClaimId, deliveryClaimId, item };
+}
+
+// A queued item as the origin's own command receives it.
+function describeQueuedItem(item) {
+  return Object.freeze({
+    jobId: item.jobId,
+    workerCompleted: item.workerCompleted === true,
+    verified: item.verified === true,
+    prompt: redactText(item.prompt).slice(0, 1_200)
+  });
+}
+
+/**
+ * Claims one queued result for the origin's own command without acknowledging it. The command's
+ * output is the delivery, so it writes the result first. It then calls `acknowledge()`, or, when
+ * the write failed, `release()`, which puts the result back in the inbox for the next origin
+ * command without spending the failure quota. Resolves to null when nothing is queued.
+ *
+ * @returns {Promise<null | {result: {jobId, workerCompleted, verified, prompt},
+ *   acknowledge: () => Promise<void>, release: () => Promise<void>}>}
+ */
+export async function claimBridgeInboxResult(options) {
+  const { origin, stateOperations } = options;
+  assertOrigin(origin);
+  if (typeof stateOperations?.claimInbox !== "function" ||
+      typeof stateOperations?.acknowledgeInboxDelivery !== "function" ||
+      typeof stateOperations?.requeueInboxDelivery !== "function") {
+    throw new Error("inbox claim requires broker-owned claim, acknowledgement and requeue operations");
+  }
+  const claimed = await claimQueuedItem(origin, stateOperations);
+  if (claimed === null) return null;
+  const { inboxClaimId, deliveryClaimId, item } = claimed;
+  return Object.freeze({
+    result: describeQueuedItem(item),
+    async acknowledge() {
+      const acknowledgedAt = (options.now ?? (() => new Date()))().toISOString();
+      await stateOperations.acknowledgeInboxDelivery(
+        structuredClone(origin), inboxClaimId, deliveryClaimId,
+        { jobId: item.jobId, route: "waiter", deliveredAt: acknowledgedAt, acknowledgedAt }
+      );
+    },
+    async release() {
+      await stateOperations.requeueInboxDelivery(
+        structuredClone(origin), inboxClaimId, deliveryClaimId,
+        { jobId: item.jobId, reason: OUTPUT_FAILED }
+      );
+    }
+  });
 }
 
 export async function drainBridgeInbox(options) {
@@ -168,22 +275,13 @@ export async function drainBridgeInbox(options) {
       typeof stateOperations?.acknowledgeInboxDelivery !== "function") {
     throw new Error("inbox drain requires broker-owned claim and acknowledgement operations");
   }
-  const claimed = await stateOperations.claimInbox(structuredClone(origin));
+  const claimed = await claimQueuedItem(origin, stateOperations);
   if (claimed === null) return { state: "empty" };
-  const { inboxClaimId, deliveryClaimId, item } = claimed ?? {};
-  if (typeof inboxClaimId !== "string" || typeof deliveryClaimId !== "string" ||
-      !JOB_ID_PATTERN.test(item?.jobId ?? "") || !sameOrigin(item.origin, origin)) {
-    throw new Error("broker returned an invalid or cross-origin inbox claim");
-  }
+  const { inboxClaimId, deliveryClaimId, item } = claimed;
   const route = typeof options.waiter === "function" ? "waiter" : "origin";
   try {
     const acknowledgement = route === "waiter"
-      ? await options.waiter(Object.freeze({
-        jobId: item.jobId,
-        workerCompleted: item.workerCompleted === true,
-        verified: item.verified === true,
-        prompt: redactText(item.prompt).slice(0, 1_200)
-      }))
+      ? await options.waiter(describeQueuedItem(item))
       : await (options.originAdapter ?? createCodexOriginAdapter())({
         cwd: origin.cwd,
         resumeThreadId: origin.codexThreadId,
@@ -201,6 +299,13 @@ export async function drainBridgeInbox(options) {
     );
     return { state: "acknowledged", route, jobId: item.jobId };
   } catch (error) {
+    if (route === "origin" && isOriginBusyError(error) && typeof stateOperations.requeueInboxDelivery === "function") {
+      await stateOperations.requeueInboxDelivery(
+        structuredClone(origin), inboxClaimId, deliveryClaimId,
+        { jobId: item.jobId, reason: ORIGIN_BUSY }
+      );
+      return { state: "queued", route: "inbox", reason: ORIGIN_BUSY, jobId: item.jobId };
+    }
     if (typeof stateOperations.failInboxDelivery !== "function") {
       throw new Error("inbox retry failed and no broker-owned terminal failure operation is available", { cause: error });
     }

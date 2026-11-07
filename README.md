@@ -118,6 +118,22 @@ acknowledged; `3` means the terminal job failed or did not satisfy verification
 and delivery; `4` means Claude has a pending question that needs a reply. A wait
 timeout is an operational error and exits nonzero with a diagnostic.
 
+Run `wait` from the Codex session that delegated the job (its `CODEX_THREAD_ID`
+equals the job's origin thread) to receive the result there: that `wait` holds
+the job's waiter lease and prints the result, in plain text as well as in
+`--json`, and acknowledges the delivery only after the output was written. Any
+other caller only observes. If the origin was busy and no `wait` was running, the
+result is queued: `status --json` shows `deliveryQueue: "inbox"` and
+`lastError: "origin-busy"`, and the origin's next `wait`, `status` or `delegate`
+prints the queued results and acknowledges them once that output was written. A
+command that times out, fails, is interrupted or cannot write its output (a
+closed pipe) leaves them queued, and a failed write records
+`lastError: "origin-output-failed"` without spending the inbox quota. The receipt
+the delivering command prints still shows `delivery.state: "pending"`, because it
+is read before the write is confirmed; the stored delivery is acknowledged once
+the write succeeded. Workers and the verifier inherit `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` when they are set.
+
 `send` provides live same-session steering only while the authoritative Claude
 worker is still running. The first authoritative result closes that input
 window so verification and delivery can begin. Without `--wait`, exit `0` means

@@ -59,13 +59,23 @@ function cleanCodexStderr(stderr) {
     .join("\n");
 }
 
+// The host's own Codex configuration decides the sandbox and approval policy.
+// A key is sent only when the caller chose a value: the app-server persists an
+// override in the thread, so a defaulted value would permanently rewrite the
+// permissions of every thread it touched, including a resumed origin thread.
+function permissionOverrides(options) {
+  return {
+    ...(options.approvalPolicy != null ? { approvalPolicy: options.approvalPolicy } : {}),
+    ...(options.sandbox != null ? { sandbox: options.sandbox } : {})
+  };
+}
+
 /** @returns {ThreadStartParams} */
 function buildThreadParams(cwd, options = {}) {
   return {
     cwd,
     model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
+    ...permissionOverrides(options),
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true,
     experimentalRawEvents: false
@@ -78,8 +88,7 @@ function buildResumeParams(threadId, cwd, options = {}) {
     threadId,
     cwd,
     model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
+    ...permissionOverrides(options)
   };
 }
 
@@ -1047,7 +1056,7 @@ export async function runAppServerReview(cwd, options = {}) {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
     const thread = await startThread(client, cwd, {
       model: options.model,
-      sandbox: "read-only",
+      sandbox: options.sandbox,
       ephemeral: true,
       threadName: options.threadName
     });

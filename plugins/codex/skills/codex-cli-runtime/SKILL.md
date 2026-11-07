@@ -4,6 +4,8 @@ description: Internal helper contract for calling the codex-companion runtime fr
 user-invocable: false
 ---
 
+<!-- Modified by Kennedy Umege for Codex-Claude Bridge, 2026. -->
+
 # Codex Runtime
 
 Use this skill only inside the `codex:codex-rescue` subagent.
@@ -21,7 +23,7 @@ Execution rules:
 - Leave `--effort` unset unless the user explicitly requests a specific effort.
 - Leave model unset by default. Add `--model` only when the user explicitly asks for one.
 - Map `spark` to `--model gpt-5.3-codex-spark`.
-- Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
+- Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits. Without `--write` the companion sends no sandbox value, so the user's Codex configuration decides what the run may do; it does not force read-only.
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
@@ -36,7 +38,7 @@ Command selection:
 - `task --resume-last`: internal helper for "keep going", "resume", "apply the top fix", or "dig deeper" after a previous rescue run.
 
 Safety rules:
-- Default to write-capable Codex work in `codex:codex-rescue` unless the user explicitly asks for read-only behavior.
+- Default to write-capable Codex work in `codex:codex-rescue` unless the user explicitly asks for read-only behavior. Omitting `--write` leaves the sandbox to the user's Codex configuration; it does not enforce read-only.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the stdout of the `task` command exactly as-is.

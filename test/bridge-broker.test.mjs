@@ -9,6 +9,7 @@ import { runBridgeBroker } from "../scripts/lib/bridge-broker.mjs";
 function spec(base) {
   const absolute = (name) => path.join(base, name);
   return {
+    schemaVersion: 1,
     jobId: "ccb_00000000000000000000000001",
     prompt: "durable prompt",
     workerCapabilityToken: "w".repeat(43),
