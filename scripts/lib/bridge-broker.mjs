@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { ORIGIN_BUSY } from "./bridge-delivery.mjs";
 import { createBridgeRuntime } from "./bridge-runtime.mjs";
 import { createProductionBridgeRepairLifecycle } from "./bridge-repair.mjs";
 import { readReceipt } from "./bridge-messaging.mjs";
@@ -209,6 +210,13 @@ export async function runBridgeBroker(specInput, options = {}) {
     }
     if (outcome?.action === "delivery" && ["acknowledged", "deduplicated"].includes(outcome.classification)) {
       return { status: "settled", outcome, heartbeat };
+    }
+    if (outcome?.action === "delivery" && outcome.classification === "queued" &&
+        outcome.delivery?.reason === ORIGIN_BUSY) {
+      // The origin's Codex process holds its thread. Every retry from here would
+      // spawn an app-server that fails the same way, so the broker stops; the
+      // origin's next wait, status or delegate drains the queued result.
+      return { status: "queued", outcome, heartbeat };
     }
     if (outcome?.action === "terminal" && outcome?.classification === "settled") {
       return { status: "settled", outcome, heartbeat };

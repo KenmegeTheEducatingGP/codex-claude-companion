@@ -6,6 +6,18 @@ import {
 } from "./bridge-contracts.mjs";
 
 const JOB_ID_PATTERN = /^ccb_[0-9A-HJKMNP-TV-Z]{26}$/;
+// The delivery error recorded when the origin thread is in use. It never spends
+// the inbox failure quota.
+export const ORIGIN_BUSY = "origin-busy";
+const INVALID_REQUEST_RPC_CODE = -32600;
+
+// A Codex thread admits one writer process. While the origin session runs (for
+// example inside `codex-claude wait`), a resume from another process fails with
+// "thread <id> already has an active writer". The origin is busy, not broken.
+export function isOriginBusyError(error) {
+  return error?.rpcCode === INVALID_REQUEST_RPC_CODE &&
+    /\balready has an active writer\b/.test(String(error?.message ?? ""));
+}
 
 function assertOrigin(origin) {
   if (!origin || typeof origin !== "object" || typeof origin.codexThreadId !== "string" ||
@@ -107,9 +119,15 @@ export async function deliverBridgeResult(options) {
   const claim = await stateOperations.claimDelivery(result.jobId, { route, origin: structuredClone(origin) });
   if (!claim?.accepted) {
     if (["inbox", "inbox_claimed"].includes(claim?.state)) {
-      return { state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId };
+      return {
+        state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId,
+        ...(claim.lastError === ORIGIN_BUSY ? { reason: ORIGIN_BUSY } : {})
+      };
     }
     if (claim?.state === "claimed") {
+      if (claim.route === "waiter" && route !== "waiter") {
+        return { state: "awaiting-waiter", route: "waiter", jobId: result.jobId };
+      }
       return { state: "deferred", route, jobId: result.jobId };
     }
     if (claim?.state === "failed") {
@@ -119,6 +137,11 @@ export async function deliverBridgeResult(options) {
   }
   if (typeof claim.claimId !== "string" || claim.claimId.length === 0) {
     throw new Error("broker returned an invalid durable delivery claim");
+  }
+  if (claim.route === "waiter" && route !== "waiter") {
+    // The origin's own `wait` holds the waiter lease, so the claim is its to
+    // acknowledge as it prints the result. Resuming the origin would fail.
+    return { state: "awaiting-waiter", route: "waiter", jobId: result.jobId };
   }
   const envelope = buildEnvelope(result, receipt, origin);
   try {
@@ -139,6 +162,7 @@ export async function deliverBridgeResult(options) {
       throw new Error("delivery failed and no broker-owned durable inbox operation is available", { cause: error });
     }
     const queuedAt = (options.now ?? (() => new Date()))().toISOString();
+    const originBusy = route === "origin" && isOriginBusyError(error);
     await stateOperations.failDeliveryToInbox(result.jobId, claim.claimId, {
       schemaVersion: 1,
       jobId: result.jobId,
@@ -148,11 +172,14 @@ export async function deliverBridgeResult(options) {
       workerCompleted: result.status === "completed",
       verified: envelope.verified,
       failedRoute: route,
-      error: redactText(error?.message ?? error).slice(0, 320),
+      error: originBusy ? ORIGIN_BUSY : redactText(error?.message ?? error).slice(0, 320),
       attempt: 0,
       queuedAt
     });
-    return { state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId };
+    return {
+      state: "queued", route: "inbox", failedRoute: route, jobId: result.jobId,
+      ...(originBusy ? { reason: ORIGIN_BUSY } : {})
+    };
   }
   const acknowledgedAt = (options.now ?? (() => new Date()))().toISOString();
   await stateOperations.acknowledgeDelivery(result.jobId, claim.claimId, {
@@ -201,6 +228,13 @@ export async function drainBridgeInbox(options) {
     );
     return { state: "acknowledged", route, jobId: item.jobId };
   } catch (error) {
+    if (route === "origin" && isOriginBusyError(error) && typeof stateOperations.requeueInboxDelivery === "function") {
+      await stateOperations.requeueInboxDelivery(
+        structuredClone(origin), inboxClaimId, deliveryClaimId,
+        { jobId: item.jobId, reason: ORIGIN_BUSY }
+      );
+      return { state: "queued", route: "inbox", reason: ORIGIN_BUSY, jobId: item.jobId };
+    }
     if (typeof stateOperations.failInboxDelivery !== "function") {
       throw new Error("inbox retry failed and no broker-owned terminal failure operation is available", { cause: error });
     }

@@ -14,6 +14,7 @@ import {
   resolveBridgeStateRoot
 } from "./bridge-state.mjs";
 import { validateBridgeMessageOperationContract, validateBridgeReceiptContract } from "./bridge-contracts.mjs";
+import { ORIGIN_BUSY } from "./bridge-delivery.mjs";
 import { createBridgeReceipt, updateBridgeDeliveryReceipt, updateBridgeVerificationReceipt, updateBridgeWorkerReceipt } from "./bridge-receipt.mjs";
 
 export const BRIDGE_MESSAGE_QUOTAS = Object.freeze({
@@ -29,6 +30,14 @@ export const BRIDGE_DELIVERY_QUOTAS = Object.freeze({
   maxInboxAttempts: 64,
   deliveryClaimTtlMs: 30 * 1_000,
   inboxClaimTtlMs: 5 * 60 * 1_000
+});
+
+// The origin's own `wait` holds this lease while it runs. A live lease makes the
+// waiter the delivery route: the broker claims the delivery for it and the
+// waiter acknowledges as it prints the result.
+export const BRIDGE_WAITER_LEASE = Object.freeze({
+  leaseMs: 30 * 1_000,
+  refreshMs: 5 * 1_000
 });
 
 const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
@@ -661,11 +670,122 @@ function authorityForJob(jobId, options = {}) {
   return { ...options, brokerAuthority: options.brokerAuthorityForJob(jobId) };
 }
 
+function waiterLeasePath(jobId, options = {}) {
+  return path.join(resolveBridgeJobDir(jobId, options), "waiter.lease");
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function readWaiterLeaseFile(jobId, options = {}) {
+  const file = waiterLeasePath(jobId, options);
+  try {
+    assertRegularPrivateFile(file);
+  } catch (error) {
+    if (error?.code === "ENOENT" || /ENOENT/.test(error.message)) return null;
+    throw error;
+  }
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (value?.schemaVersion !== 1 || value.jobId !== jobId ||
+      typeof value.leaseId !== "string" || !ID_PATTERN.test(value.leaseId) ||
+      !Number.isInteger(value.pid) || value.pid < 1 ||
+      !Number.isFinite(Date.parse(value.acquiredAt)) || !Number.isFinite(Date.parse(value.expiresAt))) {
+    throw new Error(`Invalid waiter lease for ${jobId}`);
+  }
+  return value;
+}
+
+function waiterLeaseLive(lease, options = {}) {
+  return Boolean(lease) && Date.parse(lease.expiresAt) > Date.parse(now(options)) &&
+    (options.processAlive ?? processAlive)(lease.pid);
+}
+
+// Delivery routing reads the lease under the job lock. An unreadable lease file
+// cannot name a live waiter, so delivery keeps the origin route it had before.
+function liveWaiterLease(jobId, options = {}) {
+  let lease;
+  try {
+    lease = readWaiterLeaseFile(jobId, options);
+  } catch {
+    return null;
+  }
+  return waiterLeaseLive(lease, options) ? lease : null;
+}
+
+export function readWaiterLease(jobId, options = {}) {
+  assertBridgeBrokerAuthority(jobId, options);
+  const lease = readWaiterLeaseFile(jobId, options);
+  return lease ? { ...structuredClone(lease), live: waiterLeaseLive(lease, options) } : null;
+}
+
+// Acquires the waiter lease, or refreshes it when `claim.leaseId` already holds it.
+export function acquireWaiterLease(jobId, claim = {}, options = {}) {
+  return withJobMutationLock(jobId, options, () => {
+    assertBridgeBrokerAuthority(jobId, options);
+    const pid = claim.pid ?? process.pid;
+    if (!Number.isInteger(pid) || pid < 1) throw new Error("Invalid waiter lease pid");
+    const leaseMs = claim.leaseMs ?? BRIDGE_WAITER_LEASE.leaseMs;
+    if (!Number.isInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 10 * 60_000) throw new Error("Invalid waiter leaseMs");
+    if (claim.leaseId != null && (typeof claim.leaseId !== "string" || !ID_PATTERN.test(claim.leaseId))) {
+      throw new Error("Invalid waiter leaseId");
+    }
+    let current = null;
+    try {
+      current = readWaiterLeaseFile(jobId, options);
+    } catch {
+      current = null;
+    }
+    const refresh = claim.leaseId != null && current?.leaseId === claim.leaseId;
+    if (current && !refresh && waiterLeaseLive(current, options)) {
+      return { acquired: false, leaseId: current.leaseId, expiresAt: current.expiresAt };
+    }
+    const heartbeatAt = now(options);
+    const lease = {
+      schemaVersion: 1,
+      jobId,
+      leaseId: refresh ? current.leaseId : `waiter-${crypto.randomUUID()}`,
+      pid,
+      acquiredAt: refresh ? current.acquiredAt : heartbeatAt,
+      heartbeatAt,
+      expiresAt: new Date(Date.parse(heartbeatAt) + leaseMs).toISOString()
+    };
+    const file = waiterLeasePath(jobId, options);
+    writeJsonAtomic(file, lease);
+    if (process.platform !== "win32") fs.chmodSync(file, 0o600);
+    return { acquired: true, leaseId: lease.leaseId, expiresAt: lease.expiresAt };
+  });
+}
+
+export function releaseWaiterLease(jobId, leaseId, options = {}) {
+  return withJobMutationLock(jobId, options, () => {
+    assertBridgeBrokerAuthority(jobId, options);
+    let current = null;
+    try {
+      current = readWaiterLeaseFile(jobId, options);
+    } catch {
+      current = null;
+    }
+    if (!current || current.leaseId !== leaseId) return false;
+    fs.rmSync(waiterLeasePath(jobId, options), { force: true });
+    return true;
+  });
+}
+
 export function claimDelivery(jobId, metadata, options = {}) {
   return withJobMutationLock(jobId, options, () => {
     assertBridgeBrokerAuthority(jobId, options);
     const origin = assertOriginBound(jobId, metadata?.origin, options);
     if (!new Set(["waiter", "origin"]).has(metadata?.route)) throw new Error("Invalid delivery route");
+    // A live origin waiter is the delivery route: resuming the origin thread
+    // while its own `wait` runs always fails with an active-writer error.
+    const route = metadata.route === "origin" && liveWaiterLease(jobId, options) ? "waiter" : metadata.route;
     const current = readDelivery(jobId, options);
     if (current) {
       const claimedAt = Date.parse(current.claimedAt);
@@ -673,24 +793,30 @@ export function claimDelivery(jobId, metadata, options = {}) {
       const claimAgeMs = Date.parse(currentTime) - claimedAt;
       const claimTtlMs = options.deliveryClaimTtlMs ?? BRIDGE_DELIVERY_QUOTAS.deliveryClaimTtlMs;
       if (current.state !== "claimed" || !Number.isFinite(claimedAt) || claimAgeMs < claimTtlMs) {
-        return { accepted: false, state: current.state, claimId: current.deliveryClaimId };
+        return {
+          accepted: false,
+          state: current.state,
+          claimId: current.deliveryClaimId,
+          route: current.route,
+          lastError: current.lastError ?? null
+        };
       }
       current.deliveryClaimId = `delivery-${crypto.randomUUID()}`;
       current.origin = origin;
-      current.route = metadata.route;
+      current.route = route;
       current.claimedAt = currentTime;
       current.attempts += 1;
       current.lastError = null;
       writeDelivery(jobId, current, options);
-      return { accepted: true, claimId: current.deliveryClaimId, recovered: true };
+      return { accepted: true, claimId: current.deliveryClaimId, route, recovered: true };
     }
     const deliveryClaimId = `delivery-${crypto.randomUUID()}`;
     writeDelivery(jobId, {
-      schemaVersion: 1, jobId, origin, state: "claimed", route: metadata.route,
+      schemaVersion: 1, jobId, origin, state: "claimed", route,
       deliveryClaimId, claimedAt: now(options), inboxClaim: null, item: null,
       attempts: 1, deliveredAt: null, acknowledgedAt: null, lastError: null
     }, options);
-    return { accepted: true, claimId: deliveryClaimId };
+    return { accepted: true, claimId: deliveryClaimId, route };
   });
 }
 
@@ -789,10 +915,26 @@ export function acknowledgeInboxDelivery(origin, inboxClaimId, deliveryClaimId, 
       throw new Error("Inbox acknowledgement replay conflict");
     }
     if (current.state !== "inbox_claimed") throw new Error("Inbox item is not claimed");
+    if (!new Set(["waiter", "origin"]).has(metadata?.route)) throw new Error("Invalid inbox acknowledgement route");
     assertDeliveryTimestamps(metadata);
     current.state = "acknowledged";
+    // Record the route that actually delivered the queued item.
+    current.route = metadata.route;
     current.deliveredAt = metadata.deliveredAt;
     current.acknowledgedAt = metadata.acknowledgedAt;
+    return writeDelivery(metadata.jobId, current, options);
+  });
+}
+
+// Returns a claimed inbox item to the queue after an origin-busy attempt. The
+// origin is in use, not failing, so the attempt count and quota are unchanged.
+export function requeueInboxDelivery(origin, inboxClaimId, deliveryClaimId, metadata, options = {}) {
+  if (metadata?.reason !== ORIGIN_BUSY) throw new Error("Only an origin-busy inbox attempt can be requeued without spending quota");
+  return mutateInboxClaim(origin, inboxClaimId, deliveryClaimId, metadata, options, (current) => {
+    if (current.state !== "inbox_claimed") throw new Error("Inbox item is not claimed");
+    current.state = "inbox";
+    current.inboxClaim = null;
+    current.lastError = ORIGIN_BUSY;
     return writeDelivery(metadata.jobId, current, options);
   });
 }
@@ -837,7 +979,11 @@ export function createBridgeDeliveryStateOperations(options = {}) {
     recordVerification: (jobId, verification) => recordVerification(jobId, verification, jobOptions(jobId)),
     claimInbox: (origin) => claimInbox(origin, options),
     acknowledgeInboxDelivery: (origin, inboxClaimId, deliveryClaimId, metadata) => acknowledgeInboxDelivery(origin, inboxClaimId, deliveryClaimId, metadata, jobOptions(metadata.jobId)),
-    failInboxDelivery: (origin, inboxClaimId, deliveryClaimId, metadata) => failInboxDelivery(origin, inboxClaimId, deliveryClaimId, metadata, jobOptions(metadata.jobId))
+    failInboxDelivery: (origin, inboxClaimId, deliveryClaimId, metadata) => failInboxDelivery(origin, inboxClaimId, deliveryClaimId, metadata, jobOptions(metadata.jobId)),
+    requeueInboxDelivery: (origin, inboxClaimId, deliveryClaimId, metadata) => requeueInboxDelivery(origin, inboxClaimId, deliveryClaimId, metadata, jobOptions(metadata.jobId)),
+    readWaiterLease: (jobId) => readWaiterLease(jobId, jobOptions(jobId)),
+    acquireWaiterLease: (jobId, claim) => acquireWaiterLease(jobId, claim, jobOptions(jobId)),
+    releaseWaiterLease: (jobId, leaseId) => releaseWaiterLease(jobId, leaseId, jobOptions(jobId))
   });
 }
 

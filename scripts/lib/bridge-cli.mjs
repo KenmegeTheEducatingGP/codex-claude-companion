@@ -9,7 +9,13 @@ import { persistBridgeBrokerSpec } from "./bridge-broker.mjs";
 import { inspectBridgeRuntimeCompatibility } from "./bridge-runtime.mjs";
 import { buildBridgeRequest } from "./bridge-request.mjs";
 import * as bridgeState from "./bridge-state.mjs";
-import { readReceipt } from "./bridge-messaging.mjs";
+import { drainBridgeInbox } from "./bridge-delivery.mjs";
+import {
+  BRIDGE_WAITER_LEASE,
+  createBridgeCoordinationOperations,
+  readDelivery,
+  readReceipt
+} from "./bridge-messaging.mjs";
 import {
   commitBridgeInput,
   discardStagedBridgeInput,
@@ -30,6 +36,7 @@ const AUTO_RECOVERY_SCAN_LIMIT = 64;
 const AUTO_RECOVERY_START_LIMIT = 8;
 const GC_SCAN_LIMIT = 256;
 const GC_APPLY_LIMIT = 64;
+const QUEUE_DRAIN_LIMIT = 64;
 
 export const BRIDGE_COMMANDS = Object.freeze(new Set([
   "delegate", "wait", "status", "logs", "cancel", "recover", "list", "attach", "bridge-doctor", "send", "gc"
@@ -254,6 +261,13 @@ function snapshot(jobId, options, { tolerateReceiptError = false } = {}) {
     if (!tolerateReceiptError) throw error;
     artifactErrors.push({ artifact: "receipt", message: diagnosticMessage(error) });
   }
+  let delivery = null;
+  try {
+    delivery = readDelivery(jobId, { ...options, brokerAuthority });
+  } catch (error) {
+    if (!tolerateReceiptError) throw error;
+    artifactErrors.push({ artifact: "delivery", message: diagnosticMessage(error) });
+  }
   return {
     schemaVersion: 1,
     jobId,
@@ -270,6 +284,10 @@ function snapshot(jobId, options, { tolerateReceiptError = false } = {}) {
     pendingQuestions,
     broker: readJson(files.brokerHeartbeat),
     receipt,
+    // The v1 receipt keeps delivery "pending" while a result waits in the
+    // inbox; the queue and its last error come from the durable delivery file.
+    deliveryQueue: ["inbox", "inbox_claimed"].includes(delivery?.state) ? "inbox" : null,
+    lastError: delivery && delivery.state !== "acknowledged" ? delivery.lastError ?? null : null,
     result: bridgeState.readBridgeResult(jobId, options),
     artifactErrors
   };
@@ -292,6 +310,8 @@ function unreadableSnapshot(jobId, error) {
     pendingQuestions: [],
     broker: null,
     receipt: null,
+    deliveryQueue: null,
+    lastError: null,
     result: null,
     artifactErrors: [{ artifact: "job", message: diagnosticMessage(error) }]
   };
@@ -355,6 +375,91 @@ export function autoRecoverBridgeJobs(bridgeOptions, scope, deps = {}, excludedJ
   };
 }
 
+function originCoordination(bridgeOptions) {
+  return createBridgeCoordinationOperations({
+    ...bridgeOptions,
+    brokerAuthorityForJob: (candidate) => bridgeState.getBridgeBrokerAuthority(candidate, bridgeOptions)
+  });
+}
+
+// Delivers queued (inbox) results for one exact origin to this command's
+// output. The caller is that origin, so printing them is the delivery.
+async function drainOriginQueue(coordination, origin, queued) {
+  for (let index = 0; index < QUEUE_DRAIN_LIMIT; index += 1) {
+    const drained = await drainBridgeInbox({
+      origin,
+      stateOperations: coordination,
+      waiter: async (item) => {
+        queued.push({ jobId: item.jobId, workerCompleted: item.workerCompleted, verified: item.verified, prompt: item.prompt });
+        return { acknowledged: true };
+      }
+    });
+    if (drained.state !== "acknowledged") return;
+  }
+}
+
+// Drains every queued result addressed to this Codex thread, bounded like
+// auto-recovery. It runs before auto-recovery, so a result delivered here never
+// restarts a broker.
+async function drainOriginThreadQueue(bridgeOptions, codexThreadId) {
+  const queued = [];
+  if (!codexThreadId) return queued;
+  const coordination = originCoordination(bridgeOptions);
+  const origins = new Map();
+  for (const jobId of listBridgeJobIds(bridgeOptions).reverse().slice(0, AUTO_RECOVERY_SCAN_LIMIT)) {
+    try {
+      const { origin } = bridgeState.readBridgeRequest(jobId, bridgeOptions);
+      if (origin?.codexThreadId !== codexThreadId) continue;
+      if (!["inbox", "inbox_claimed"].includes(coordination.readDelivery(jobId)?.state)) continue;
+      origins.set(JSON.stringify(origin), origin);
+    } catch {
+      // An unreadable job is reported by status and list; the drain skips it.
+    }
+  }
+  for (const origin of origins.values()) await drainOriginQueue(coordination, origin, queued);
+  return queued;
+}
+
+// The origin's own `wait` holds the job's waiter lease, which makes it the
+// delivery route: it acknowledges a waiter claim, or drains the job's queued
+// result, as it prints the result.
+function createOriginWaiter(jobId, bridgeOptions, queued) {
+  const coordination = originCoordination(bridgeOptions);
+  const { origin } = bridgeState.readBridgeRequest(jobId, bridgeOptions);
+  let leaseId = null;
+  let refreshAt = 0;
+  return {
+    async settle() {
+      if (Date.now() >= refreshAt) {
+        const lease = coordination.acquireWaiterLease(jobId, { leaseId, pid: process.pid });
+        leaseId = lease.acquired ? lease.leaseId : null;
+        refreshAt = Date.now() + BRIDGE_WAITER_LEASE.refreshMs;
+      }
+      const delivery = coordination.readDelivery(jobId);
+      if (leaseId !== null && delivery?.state === "claimed" && delivery.route === "waiter") {
+        const acknowledgedAt = new Date().toISOString();
+        coordination.acknowledgeDelivery(jobId, delivery.deliveryClaimId, {
+          route: "waiter", deliveredAt: acknowledgedAt, acknowledgedAt
+        });
+      } else if (delivery?.state === "inbox") {
+        await drainOriginQueue(coordination, origin, queued);
+      }
+    },
+    release() {
+      if (leaseId !== null) coordination.releaseWaiterLease(jobId, leaseId);
+    }
+  };
+}
+
+function outputWithQueuedResults(payload, queued, json, write) {
+  if (queued.length === 0) return output(payload, json, write);
+  if (json) return output({ ...payload, queuedResults: queued }, json, write);
+  (write ?? ((text) => process.stdout.write(text)))(
+    `Queued bridge results delivered to this Codex thread:\n${queued.map((entry) => redact(entry.prompt)).join("\n\n")}\n\n`
+  );
+  return output(payload, json, write);
+}
+
 async function delegate(argv, deps) {
   const { options, positionals } = parse(argv, {
     booleanOptions: ["json", "wait"],
@@ -406,6 +511,7 @@ async function delegate(argv, deps) {
     settingSources: options["setting-sources"]
   });
   const bridgeOptions = stateOptions(options);
+  const queuedResults = await drainOriginThreadQueue(bridgeOptions, codexThreadId);
   autoRecoverBridgeJobs(bridgeOptions, request.origin, deps);
   const created = bridgeState.createBridgeJob(request, bridgeOptions);
   const files = artifacts(request.jobId, bridgeOptions);
@@ -429,7 +535,7 @@ async function delegate(argv, deps) {
     securityRequirements: {}
   });
   const broker = startBroker(request.jobId, bridgeOptions, deps);
-  output({
+  outputWithQueuedResults({
     schemaVersion: 1,
     jobId: request.jobId,
     status: "accepted",
@@ -439,47 +545,58 @@ async function delegate(argv, deps) {
     brokerPid: broker.pid,
     monitor: "detached durable broker",
     next: `codex-claude wait ${request.jobId}`
-  }, options.json, deps.write);
-  if (options.wait) return waitForJob(request.jobId, bridgeOptions, { json: options.json }, deps);
+  }, queuedResults, options.json, deps.write);
+  if (options.wait) return waitForJob(request.jobId, bridgeOptions, { json: options.json, originCaller: true }, deps);
   return 0;
 }
 
 async function waitForJob(jobId, bridgeOptions, options, deps = {}) {
-  const initial = snapshot(jobId, bridgeOptions);
-  if (!TERMINAL.has(initial.status) && initial.pendingQuestionCount > 0) {
-    output(initial, options.json, deps.write);
-    return 4;
-  }
-  if (snapshotSettled(initial)) {
-    output(initial, options.json, deps.write);
-    if (initial.status !== "completed") return 3;
-    return initial.receipt?.verification?.state === "passed" && initial.receipt?.delivery?.state === "acknowledged" ? 0 : 3;
-  }
-  startBroker(jobId, bridgeOptions, deps);
-  const timeoutSeconds = integer(options.timeout, 86_400, "timeout");
-  const deadline = Date.now() + timeoutSeconds * 1_000;
-  while (Date.now() < deadline) {
-    const current = snapshot(jobId, bridgeOptions);
-    if (!TERMINAL.has(current.status) && current.pendingQuestionCount > 0) {
-      output(current, options.json, deps.write);
+  const queued = [...(options.queuedResults ?? [])];
+  const emit = (payload) => outputWithQueuedResults(payload, queued, options.json, deps.write);
+  // Only the origin's own wait becomes the delivery route; any other caller
+  // observes and never acknowledges.
+  const originWaiter = options.originCaller === true ? createOriginWaiter(jobId, bridgeOptions, queued) : null;
+  try {
+    await originWaiter?.settle();
+    const initial = snapshot(jobId, bridgeOptions);
+    if (!TERMINAL.has(initial.status) && initial.pendingQuestionCount > 0) {
+      emit(initial);
       return 4;
     }
-    if (TERMINAL.has(current.status) && current.result && current.status !== "completed" &&
-        ["acknowledged", "failed"].includes(current.receipt?.delivery?.state)) {
-      output(current, options.json, deps.write);
-      return 3;
+    if (snapshotSettled(initial)) {
+      emit(initial);
+      if (initial.status !== "completed") return 3;
+      return initial.receipt?.verification?.state === "passed" && initial.receipt?.delivery?.state === "acknowledged" ? 0 : 3;
     }
-    const verificationState = current.receipt?.verification?.state;
-    const deliveryState = current.receipt?.delivery?.state;
-    if (current.status === "completed" && current.result &&
-        ["passed", "failed"].includes(verificationState) &&
-        ["acknowledged", "failed"].includes(deliveryState)) {
-      output(current, options.json, deps.write);
-      return verificationState === "passed" && deliveryState === "acknowledged" ? 0 : 3;
+    startBroker(jobId, bridgeOptions, deps);
+    const timeoutSeconds = integer(options.timeout, 86_400, "timeout");
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (Date.now() < deadline) {
+      await originWaiter?.settle();
+      const current = snapshot(jobId, bridgeOptions);
+      if (!TERMINAL.has(current.status) && current.pendingQuestionCount > 0) {
+        emit(current);
+        return 4;
+      }
+      if (TERMINAL.has(current.status) && current.result && current.status !== "completed" &&
+          ["acknowledged", "failed"].includes(current.receipt?.delivery?.state)) {
+        emit(current);
+        return 3;
+      }
+      const verificationState = current.receipt?.verification?.state;
+      const deliveryState = current.receipt?.delivery?.state;
+      if (current.status === "completed" && current.result &&
+          ["passed", "failed"].includes(verificationState) &&
+          ["acknowledged", "failed"].includes(deliveryState)) {
+        emit(current);
+        return verificationState === "passed" && deliveryState === "acknowledged" ? 0 : 3;
+      }
+      await (deps.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
     }
-    await (deps.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
+    throw new Error(`Timed out waiting for bridge job ${jobId}`);
+  } finally {
+    originWaiter?.release();
   }
-  throw new Error(`Timed out waiting for bridge job ${jobId}`);
 }
 
 function tail(file, bytes = 64 * 1024) {
@@ -535,17 +652,25 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
     valueOptions: ["state-dir", "timeout", "reason", "lines", "message", "poll-interval", "question-id", "older-than-days", "limit"]
   });
   const bridgeOptions = stateOptions(options);
+  let originCaller = false;
+  let queuedResults = [];
 
   if (command !== "recover" && command !== "gc") {
     const targetJobId = JOB_PATTERN.test(positionals[0] ?? "") ? positionals[0] : null;
-    let scope = deps.codexOrigin ?? null;
-    if (!scope && targetJobId) {
-      try { scope = bridgeState.readBridgeRequest(targetJobId, bridgeOptions).origin; } catch {}
+    let targetOrigin = null;
+    if (targetJobId) {
+      try { targetOrigin = bridgeState.readBridgeRequest(targetJobId, bridgeOptions).origin; } catch {}
     }
-    if (!scope) {
-      const codexThreadId = deps.codexThreadId ?? process.env.CODEX_THREAD_ID;
-      if (codexThreadId) scope = { codexThreadId };
+    const callerThreadId = deps.codexThreadId ?? process.env.CODEX_THREAD_ID ?? null;
+    // The caller is the job's origin when its Codex thread is the one that
+    // delegated the job. Its wait and status receive the thread's queued
+    // results before auto-recovery, so a delivered result restarts no broker.
+    originCaller = Boolean(callerThreadId) && targetOrigin?.codexThreadId === callerThreadId;
+    if (originCaller && (command === "wait" || command === "status")) {
+      queuedResults = await drainOriginThreadQueue(bridgeOptions, callerThreadId);
     }
+    let scope = deps.codexOrigin ?? targetOrigin;
+    if (!scope && callerThreadId) scope = { codexThreadId: callerThreadId };
     const commandStartsTarget = new Set(["wait", "cancel", "send"]);
     const excluded = targetJobId && commandStartsTarget.has(command) ? new Set([targetJobId]) : new Set();
     autoRecoverBridgeJobs(bridgeOptions, scope, deps, excluded);
@@ -665,9 +790,9 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
     return errors.length === 0 ? 0 : 3;
   }
   const jobId = requireJobId(positionals);
-  if (command === "wait") return waitForJob(jobId, bridgeOptions, options, deps);
+  if (command === "wait") return waitForJob(jobId, bridgeOptions, { ...options, originCaller, queuedResults }, deps);
   if (command === "status") {
-    output(snapshot(jobId, bridgeOptions, { tolerateReceiptError: true }), options.json, deps.write);
+    outputWithQueuedResults(snapshot(jobId, bridgeOptions, { tolerateReceiptError: true }), queuedResults, options.json, deps.write);
     return 0;
   }
   if (command === "logs") {
