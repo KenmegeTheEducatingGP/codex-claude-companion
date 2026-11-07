@@ -15,6 +15,31 @@ const readline = require("node:readline");
 	const STATE_PATH = ${JSON.stringify(statePath)};
 	const BEHAVIOR = ${JSON.stringify(behavior)};
 	const interruptibleTurns = new Map();
+	// Models the host's own config.toml: the values a thread gets when a client
+	// passes no sandbox or approval override. Like the real app-server, an
+	// explicit override persists in the thread for later resumes.
+	const HOST_SANDBOX = "danger-full-access";
+	const HOST_APPROVAL_POLICY = "never";
+	const RECORDED_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "review/start"]);
+
+	function sandboxPolicy(mode) {
+	  if (mode === "read-only") return { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false };
+	  if (mode === "workspace-write") return { type: "workspaceWrite", writableRoots: [], networkAccess: false };
+	  return { type: "dangerFullAccess" };
+	}
+
+	function applyPermissionOverrides(thread, params) {
+	  if (params.sandbox != null) thread.sandbox = params.sandbox;
+	  if (params.approvalPolicy != null) thread.approvalPolicy = params.approvalPolicy;
+	  thread.sandbox = thread.sandbox || HOST_SANDBOX;
+	  thread.approvalPolicy = thread.approvalPolicy || HOST_APPROVAL_POLICY;
+	}
+
+	function rpcError(code, message) {
+	  const error = new Error(message);
+	  error.rpcCode = code;
+	  return error;
+	}
 
 	function loadState() {
 	  if (!fs.existsSync(STATE_PATH)) {
@@ -269,6 +294,11 @@ rl.on("line", (line) => {
 
   const message = JSON.parse(line);
   const state = loadState();
+  if (RECORDED_METHODS.has(message.method)) {
+    // Record the exact params object so tests can assert key absence.
+    state.requests = (state.requests || []).concat([{ method: message.method, params: message.params || {} }]).slice(-100);
+    saveState(state);
+  }
 
   try {
     switch (message.method) {
@@ -300,7 +330,9 @@ rl.on("line", (line) => {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.5", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        applyPermissionOverrides(thread, message.params);
+        saveState(state);
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.5", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: thread.approvalPolicy, sandbox: sandboxPolicy(thread.sandbox), reasoningEffort: null } });
         if (BEHAVIOR !== "review-completes-before-response") {
           send({ method: "thread/started", params: { thread: { id: thread.id } } });
         }
@@ -333,10 +365,15 @@ rl.on("line", (line) => {
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/resume.persistFullHistory requires experimentalApi capability");
         }
+        if (BEHAVIOR === "active-writer") {
+          // What a real app-server answers while another process holds the thread.
+          throw rpcError(-32600, "thread " + message.params.threadId + " already has an active writer");
+        }
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
+        applyPermissionOverrides(thread, message.params);
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.5", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.5", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: thread.approvalPolicy, sandbox: sandboxPolicy(thread.sandbox), reasoningEffort: null } });
         break;
       }
 
@@ -667,7 +704,7 @@ rl.on("line", (line) => {
         break;
     }
   } catch (error) {
-    send({ id: message.id, error: { code: -32000, message: error.message } });
+    send({ id: message.id, error: { code: typeof error.rpcCode === "number" ? error.rpcCode : -32000, message: error.message } });
   }
 });
 `;

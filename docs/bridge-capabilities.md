@@ -122,6 +122,59 @@ jobs and lists at most 64 terminal jobs older than 30 days. `--older-than-days`
 and `--limit` may lower or tune those documented bounds; only explicit `--apply`
 removes the listed job directories. Active and recent jobs are never candidates.
 
+## Result delivery to the origin
+
+The bridge returns a terminal result to its Codex origin through these routes, in
+order:
+
+1. **Waiter.** A `wait` run from the origin (its `CODEX_THREAD_ID` equals the
+   job's origin thread) holds `jobs/<id>/waiter.lease`, refreshed while it waits.
+   While that lease is live, the broker claims the delivery with
+   `route: "waiter"` and never resumes the origin thread; the waiter
+   acknowledges the claim after it wrote the result. The plain-text output of that
+   `wait` carries the result itself (worker status, verification, summary, files,
+   tests, blockers), and `--json` carries it in `result` and `receipt`. A `wait`
+   from any other thread is an observer: it prints and never acknowledges. If
+   the waiter cannot write its output, the claim is not acknowledged: it lapses
+   after the 30-second delivery claim TTL and the broker delivers again.
+2. **Origin resume.** With no live waiter, the broker resumes the origin thread
+   through the Codex app-server with no sandbox or approval override, so the
+   delivery turn runs under the user's Codex configuration and leaves the
+   thread's permissions unchanged.
+3. **Inbox.** A failed resume queues the result in the durable inbox. A resume
+   that fails because the origin thread already has an active writer is
+   recorded as `origin-busy`: it spends none of the 64-attempt inbox quota, and
+   the broker exits instead of retrying a thread that is in use. Other failures
+   still count against the quota. The origin's next `wait`, `status` or
+   `delegate` prints its thread's queued results (a "Bridge results delivered"
+   block, or `queuedResults` with `--json`, which lists only other jobs' results
+   because the payload already carries its own job's). Those commands claim the
+   queued results when they are about to write their output, never when they
+   start, and acknowledge them only after the write succeeded: a command that
+   times out, fails or is interrupted first leaves them queued for the next one,
+   and so does one whose write fails (a closed pipe, a full disk). A failed
+   write returns the claimed results to the inbox as `origin-output-failed`,
+   which, like `origin-busy`, spends none of the 64-attempt quota. A command
+   that dies between the claim and the acknowledgement leaves a claim that lapses
+   after the 5-minute inbox claim TTL, and the next origin command claims the
+   result again.
+   While such a command runs, the automatic recovery sweep leaves the queued jobs
+   alone, so a result delivered this way restarts no broker.
+
+The v1 receipt keeps `delivery.state: "pending"` while a result is queued or
+claimed; its schema is unchanged. The command that delivers a result prints a
+receipt read before its write is confirmed, so it too shows `"pending"`; the
+stored delivery is `acknowledged` once the write succeeded, and the next
+`status` shows it. `status --json` exposes the queue from the durable delivery
+file as `deliveryQueue: "inbox"` and `lastError`, for example `"origin-busy"` or
+`"origin-output-failed"`.
+
+Workers, the runner and the independent verifier inherit `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` when they are set, so they run under the caller's Claude and Codex
+homes; other variables stay stripped. The runner identity records only the home
+directory names. The broker runs only broker specs whose `schemaVersion` this
+release supports and refuses any other with an error.
+
 ## Durable state contracts
 
 - `schemas/bridge-delegation-request.schema.json` records immutable origin, worker, execution, policy, and task acceptance data.
