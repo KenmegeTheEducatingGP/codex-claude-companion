@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-event.schema.json",
   "title": "Codex-Claude Bridge ordered event",
+  "description": "One entry in a durable at-least-once event stream, versioned by schemaVersion. Consumers deduplicate by deduplicationKey. In schemaVersion 2 either family may author worker-side events; validators also require the author family to be the job's origin or worker family, and a question to come from the worker family.",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": { "schemaVersion": { "enum": [1, 2] } },
+  "oneOf": [{ "$ref": "#/$defs/v1" }, { "$ref": "#/$defs/v2" }],
+  "$defs": {
+  "v1": {
+  "title": "Codex-Claude Bridge ordered event",
   "description": "One entry in a durable at-least-once event stream. Consumers deduplicate by deduplicationKey.",
   "type": "object",
   "additionalProperties": false,
@@ -29,8 +37,8 @@
     { "$ref": "#/$defs/cancelRequested" },
     { "$ref": "#/$defs/cancelled" },
     { "$ref": "#/$defs/verified" }
-  ],
-  "$defs": {
+  ]
+  },
     "messagePayload": {
       "type": "object", "additionalProperties": false, "required": ["messageId", "text"],
       "properties": {
@@ -125,6 +133,36 @@
           "properties": { "verdict": { "enum": ["passed", "failed"] }, "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } } }
         }
       }
+    },
+    "v2": {
+      "$comment": "Payloads are the 1.x payload schemas, referenced in place. Origin-authored messages of either family may carry contentSha256.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "jobId", "sequence", "timestamp", "type", "sender", "deduplicationKey", "payload"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "jobId": { "$ref": "#/$defs/v1/properties/jobId" },
+        "sequence": { "$ref": "#/$defs/v1/properties/sequence" },
+        "timestamp": { "$ref": "#/$defs/v1/properties/timestamp" },
+        "type": { "$ref": "#/$defs/v1/properties/type" },
+        "sender": { "$ref": "#/$defs/v1/properties/sender" },
+        "deduplicationKey": { "$ref": "#/$defs/v1/properties/deduplicationKey" },
+        "payload": { "type": "object" }
+      },
+      "oneOf": [
+        { "properties": { "type": { "const": "accepted" }, "sender": { "const": "bridge" }, "payload": { "$ref": "#/$defs/accepted/properties/payload" } } },
+        { "properties": { "type": { "const": "started" }, "sender": { "const": "bridge" }, "payload": { "$ref": "#/$defs/started/properties/payload" } } },
+        { "properties": { "type": { "const": "progress" }, "sender": { "enum": ["bridge", "claude", "codex"] }, "payload": { "$ref": "#/$defs/progress/properties/payload" } } },
+        { "properties": { "type": { "const": "question" }, "sender": { "enum": ["claude", "codex"] }, "payload": { "$ref": "#/$defs/question/properties/payload" } } },
+        { "properties": { "type": { "const": "codex_message" }, "sender": { "const": "codex" }, "payload": { "$ref": "#/$defs/codexMessagePayload" } } },
+        { "properties": { "type": { "const": "claude_message" }, "sender": { "const": "claude" }, "payload": { "$ref": "#/$defs/codexMessagePayload" } } },
+        { "properties": { "type": { "const": "blocked" }, "sender": { "enum": ["bridge", "claude", "codex"] }, "payload": { "$ref": "#/$defs/blocked/properties/payload" } } },
+        { "properties": { "type": { "const": "completed" }, "sender": { "enum": ["bridge", "claude", "codex"] }, "payload": { "$ref": "#/$defs/completed/properties/payload" } } },
+        { "properties": { "type": { "const": "failed" }, "sender": { "enum": ["bridge", "claude", "codex"] }, "payload": { "$ref": "#/$defs/failed/properties/payload" } } },
+        { "properties": { "type": { "const": "cancel_requested" }, "sender": { "enum": ["bridge", "codex", "claude"] }, "payload": { "$ref": "#/$defs/cancelRequested/properties/payload" } } },
+        { "properties": { "type": { "const": "cancelled" }, "sender": { "enum": ["bridge", "claude", "codex"] }, "payload": { "$ref": "#/$defs/cancelled/properties/payload" } } },
+        { "properties": { "type": { "const": "verified" }, "sender": { "const": "verifier" }, "payload": { "$ref": "#/$defs/verified/properties/payload" } } }
+      ]
     }
   }
 }

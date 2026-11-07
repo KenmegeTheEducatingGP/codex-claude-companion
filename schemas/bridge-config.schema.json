@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-config.schema.json",
+  "title": "Codex-Claude Bridge user configuration",
+  "description": "Optional user configuration read from CODEX_CLAUDE_CONFIG, else $XDG_CONFIG_HOME/codex-claude/config.json, else ~/.config/codex-claude/config.json. Every key is optional; an absent key keeps the built-in behaviour. Older versions do not read this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "description": "Profile used when a delegation names none. sandbox-autonomous is unavailable and cannot be a default.",
+          "enum": ["host", "review-readonly", "standard", "trusted-autonomous"]
+        },
+        "workerFamily": { "enum": ["claude", "codex"] },
+        "maxRepairs": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "overagePolicy": {
+          "description": "What a job does when the worker starts drawing on overage billing. stop is the only value: the bridge never enables or continues into overage.",
+          "enum": ["stop"]
+        }
+      }
+    },
+    "reviewLanePolicy": {
+      "description": "Permission profile for the legacy review lanes. null keeps the 1.x behaviour.",
+      "type": ["string", "null"],
+      "enum": ["host", "review-readonly", "standard", null]
+    },
+    "presets": {
+      "description": "Per-preset profile overrides, keyed by an existing agent preset name.",
+      "type": "object",
+      "propertyNames": { "enum": ["implementer", "debugger", "reviewer", "security-reviewer", "researcher", "elite-reviewer"] },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["profile"],
+        "properties": {
+          "profile": { "enum": ["host", "review-readonly", "standard", "trusted-autonomous"] }
+        }
+      }
+    },
+    "routing": {
+      "description": "Routing rules keyed by task family. A rule may name the worker family, the model and the effort; an omitted or null field leaves that choice to the host configuration.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "family": { "enum": ["claude", "codex"] },
+          "model": { "type": ["string", "null"], "minLength": 1 },
+          "effort": { "type": ["string", "null"], "minLength": 1 }
+        }
+      }
+    },
+    "extensions": {
+      "description": "Absolute paths of extension modules, loaded in order. A module that fails to load fails the delegation before launch.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^/" }
+    }
+  }
+}
