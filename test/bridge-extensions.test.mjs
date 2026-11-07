@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -171,4 +172,24 @@ test("an observer that never settles is reported as timed out and does not hold 
   ]);
   await notifyExtensionObservers(extensions, { type: "started" }, { timeoutMs: 50, onError: (error, extension) => seen.push(`${extension}: ${error.message}`) });
   assert.deepEqual(seen, ["hangs: observe did not finish within 50 ms"]);
+});
+
+test("a hung observer is reported as timed out even when nothing else keeps the process alive", () => {
+  // In-process, the test runner's own handles can keep the event loop alive and hide the defect
+  // (it failed on Linux CI and passed on macOS and Windows), so run the notifier alone in a
+  // fresh Node process: the timeout timer is then the only thing that can end the wait.
+  const moduleUrl = new URL("../scripts/lib/bridge-extensions.mjs", import.meta.url).href;
+  const script = [
+    `const { notifyExtensionObservers } = await import(${JSON.stringify(moduleUrl)});`,
+    "const seen = [];",
+    "await notifyExtensionObservers(",
+    '  [{ name: "hangs", hooks: { observe: () => new Promise(() => {}) } }],',
+    '  { type: "started" },',
+    '  { timeoutMs: 50, onError: (error, extension) => seen.push(extension + ": " + error.message) }',
+    ");",
+    'console.log("continued " + JSON.stringify(seen));'
+  ].join("\n");
+  const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(run.status, 0, `exit ${run.status}; stderr: ${run.stderr}`);
+  assert.equal(run.stdout.trim(), `continued ${JSON.stringify(["hangs: observe did not finish within 50 ms"])}`);
 });
