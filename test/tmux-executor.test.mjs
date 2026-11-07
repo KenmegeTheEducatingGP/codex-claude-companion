@@ -531,7 +531,11 @@ test("executor transports current auth in a private artifact without exposing it
   assert.doesNotMatch(persistedSpec, /brokerAuthority|bridge-broker/);
   assert.doesNotMatch(command, new RegExp(secret));
   assert.doesNotMatch(command, new RegExp(WORKER_CAPABILITY));
-  assert.match(command, /^exec '\/usr\/bin\/env' -i /);
+  // The executor runs env by its verified real path (verifiedBinary resolves symlinks). Where
+  // /usr/bin/env is itself a symlink, as with rust coreutils on current Linux runners, that path
+  // is not the literal "/usr/bin/env".
+  const expectedEnvStart = `exec '${fs.realpathSync("/usr/bin/env")}' -i `;
+  assert.ok(command.startsWith(expectedEnvStart), `command should start with ${expectedEnvStart}; it starts with ${command.slice(0, 80)}`);
   assert.equal(command.endsWith(`2>> '${launched.artifacts.stderrFile}'`), true);
   assert.equal(fs.readFileSync(verificationBaseline, "utf8"), "{}\n");
   assert.equal(fs.existsSync(environmentFile), false);

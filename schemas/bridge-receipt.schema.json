@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-receipt.schema.json",
   "title": "Codex-Claude Bridge receipt and delivery state",
+  "description": "Auditable lifecycle receipt, versioned by schemaVersion. Worker completion, delivery, acknowledgement, and verification are independent states. schemaVersion 2 records the worker family, the effective worker and verifier settings, the delivery route, and the cross-family verifier.",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": { "schemaVersion": { "enum": [1, 2] } },
+  "oneOf": [{ "$ref": "#/$defs/v1" }, { "$ref": "#/$defs/v2" }],
+  "$defs": {
+  "v1": {
+  "title": "Codex-Claude Bridge receipt and delivery state",
   "description": "Auditable lifecycle receipt. Worker completion, delivery, acknowledgement, and verification are independent states.",
   "type": "object",
   "additionalProperties": false,
@@ -55,8 +63,8 @@
     { "if": { "properties": { "profile": { "const": "review-readonly" } }, "required": ["profile"] }, "then": { "properties": { "effectiveClaudePermissionArgs": { "$ref": "#/$defs/reviewReadonlyArgs" } } } },
     { "if": { "properties": { "profile": { "const": "standard" } }, "required": ["profile"] }, "then": { "properties": { "effectiveClaudePermissionArgs": { "$ref": "#/$defs/standardArgs" } } } },
     { "if": { "properties": { "profile": { "enum": ["trusted-autonomous", "sandbox-autonomous"] } }, "required": ["profile"] }, "then": { "properties": { "effectiveClaudePermissionArgs": { "$ref": "#/$defs/autonomousArgs" } } } }
-  ],
-  "$defs": {
+  ]
+  },
     "settingSourcesArg": {
       "type": "string",
       "pattern": "^--setting-sources=(?:(?:user|project|local)(?:,(?:user|project|local))*)?$"
@@ -110,6 +118,232 @@
       ],
       "minItems": 52,
       "maxItems": 52
+    },
+    "v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "jobId", "createdAt", "workerState", "workerError", "worker", "delivery", "verification",
+        "profile", "routing", "quota", "extensions", "continuesJobId", "repairs"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "jobId": { "$ref": "#/$defs/v1/properties/jobId" },
+        "createdAt": { "$ref": "#/$defs/v1/properties/createdAt" },
+        "workerState": { "$ref": "#/$defs/v1/properties/workerState" },
+        "workerError": { "$ref": "#/$defs/v1/properties/workerError" },
+        "worker": { "$ref": "#/$defs/v2Worker" },
+        "delivery": { "$ref": "#/$defs/v2Delivery" },
+        "verification": { "$ref": "#/$defs/v2Verification" },
+        "profile": { "$ref": "#/$defs/v2Profile" },
+        "effectiveWorkerArgs": { "type": "array", "items": { "type": "string" }, "description": "Claude workers only: the exact permission arguments the profile passed." },
+        "effectiveWorkerParams": { "type": "object", "description": "Codex workers only: the exact thread parameters the profile passed." },
+        "routing": { "$ref": "#/$defs/v2Routing" },
+        "quota": { "type": "array", "items": { "$ref": "#/$defs/v2QuotaEvent" } },
+        "extensions": { "type": "array", "items": { "$ref": "#/$defs/v2ExtensionDigest" } },
+        "continuesJobId": { "anyOf": [{ "$ref": "#/$defs/v1/properties/jobId" }, { "type": "null" }] },
+        "repairs": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/v2Repair" } }
+      },
+      "allOf": [
+        { "if": { "properties": { "workerState": { "const": "failed" } }, "required": ["workerState"] }, "then": { "properties": { "workerError": { "type": "string", "minLength": 1 } } }, "else": { "properties": { "workerError": { "type": "null" } } } },
+        { "if": { "properties": { "workerState": { "enum": ["accepted", "running", "stalled"] } }, "required": ["workerState"] }, "then": { "properties": { "delivery": { "type": "object", "properties": { "state": { "enum": ["pending", "failed"] } } } } } },
+        { "if": { "properties": { "verification": { "type": "object", "properties": { "state": { "enum": ["passed", "failed"] } }, "required": ["state"] } }, "required": ["verification"] }, "then": { "properties": { "workerState": { "const": "completed" } } } },
+        { "if": { "properties": { "workerState": { "const": "completed" } }, "required": ["workerState"] }, "then": { "properties": { "worker": { "type": "object", "properties": { "effective": { "type": "object" } } } } } },
+        {
+          "if": { "$ref": "#/$defs/v2WhenClaudeWorker" },
+          "then": {
+            "allOf": [{ "$ref": "#/$defs/v2ClaudeProfileMapping" }],
+            "properties": { "verification": { "type": "object", "properties": { "verifierFamily": { "const": "codex" } } } }
+          }
+        },
+        {
+          "if": { "$ref": "#/$defs/v2WhenCodexWorker" },
+          "then": {
+            "allOf": [{ "$ref": "#/$defs/v2CodexProfileMapping" }],
+            "properties": { "verification": { "type": "object", "properties": { "verifierFamily": { "const": "claude" } } } }
+          }
+        }
+      ]
+    },
+    "v2Family": { "enum": ["claude", "codex"] },
+    "v2Profile": { "enum": ["host", "review-readonly", "standard", "trusted-autonomous", "sandbox-autonomous"] },
+    "v2WhenClaudeWorker": {
+      "type": "object",
+      "required": ["worker"],
+      "properties": { "worker": { "type": "object", "required": ["family"], "properties": { "family": { "const": "claude" } } } }
+    },
+    "v2WhenCodexWorker": {
+      "type": "object",
+      "required": ["worker"],
+      "properties": { "worker": { "type": "object", "required": ["family"], "properties": { "family": { "const": "codex" } } } }
+    },
+    "v2Effective": {
+      "description": "Settings as the worker or verifier reported them at run time; null where that family reports none.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox", "approvalPolicy", "permissionMode", "model", "effort"],
+      "properties": {
+        "sandbox": { "type": ["string", "null"], "minLength": 1 },
+        "approvalPolicy": { "type": ["string", "null"], "minLength": 1 },
+        "permissionMode": { "type": ["string", "null"], "minLength": 1 },
+        "model": { "type": ["string", "null"], "minLength": 1 },
+        "effort": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "v2Worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "effective"],
+      "properties": {
+        "family": { "$ref": "#/$defs/v2Family" },
+        "effective": { "anyOf": [{ "$ref": "#/$defs/v2Effective" }, { "type": "null" }], "description": "Null until the worker reports its settings, and for a worker that failed or was cancelled before it did. A completed worker always has the record (its members are null only where the family reports none)." }
+      }
+    },
+    "v2Delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "route", "attempts", "deliveredAt", "acknowledgedAt", "lastError"],
+      "properties": {
+        "state": { "enum": ["pending", "queued", "delivered", "acknowledged", "failed"] },
+        "route": { "type": ["string", "null"], "enum": ["waiter", "origin", "inbox", null], "description": "waiter: the origin's own wait printed it; origin: resumed into the origin's thread; inbox: queued for the origin's next drain." },
+        "attempts": { "$ref": "#/$defs/v1/properties/delivery/properties/attempts" },
+        "deliveredAt": { "$ref": "#/$defs/v1/properties/delivery/properties/deliveredAt" },
+        "acknowledgedAt": { "$ref": "#/$defs/v1/properties/delivery/properties/acknowledgedAt" },
+        "lastError": { "$ref": "#/$defs/v1/properties/delivery/properties/lastError" }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "pending" } }, "required": ["state"] }, "then": { "properties": { "deliveredAt": { "type": "null" }, "acknowledgedAt": { "type": "null" }, "lastError": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "const": "delivered" } }, "required": ["state"] }, "then": { "properties": { "attempts": { "type": "integer", "minimum": 1 }, "deliveredAt": { "type": "string", "format": "date-time" }, "acknowledgedAt": { "type": "null" }, "lastError": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "const": "acknowledged" } }, "required": ["state"] }, "then": { "properties": { "attempts": { "type": "integer", "minimum": 1 }, "deliveredAt": { "type": "string", "format": "date-time" }, "acknowledgedAt": { "type": "string", "format": "date-time" }, "lastError": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "const": "failed" } }, "required": ["state"] }, "then": { "properties": { "attempts": { "type": "integer", "minimum": 1 }, "deliveredAt": { "type": "null" }, "acknowledgedAt": { "type": "null" }, "lastError": { "type": "string", "minLength": 1 } } } },
+        { "if": { "properties": { "state": { "const": "pending" } }, "required": ["state"] }, "then": { "properties": { "route": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "const": "queued" } }, "required": ["state"] }, "then": { "properties": { "route": { "const": "inbox" }, "deliveredAt": { "type": "null" }, "acknowledgedAt": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "enum": ["delivered", "acknowledged"] } }, "required": ["state"] }, "then": { "properties": { "route": { "type": "string" } } } }
+      ]
+    },
+    "v2Integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutated"],
+      "properties": { "mutated": { "type": "boolean", "description": "Whether the verifier changed the workspace the worker left." } }
+    },
+    "v2Verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "verifiedAt", "evidence", "verifierFamily", "effective", "integrity"],
+      "properties": {
+        "state": { "$ref": "#/$defs/v1/properties/verification/properties/state" },
+        "verifiedAt": { "$ref": "#/$defs/v1/properties/verification/properties/verifiedAt" },
+        "evidence": { "$ref": "#/$defs/v1/properties/verification/properties/evidence" },
+        "verifierFamily": { "$ref": "#/$defs/v2Family" },
+        "effective": { "anyOf": [{ "$ref": "#/$defs/v2Effective" }, { "type": "null" }] },
+        "integrity": { "anyOf": [{ "$ref": "#/$defs/v2Integrity" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "pending" } }, "required": ["state"] }, "then": { "properties": { "verifiedAt": { "type": "null" }, "evidence": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "properties": { "state": { "enum": ["passed", "failed"] } }, "required": ["state"] }, "then": { "properties": { "verifiedAt": { "type": "string", "format": "date-time" }, "evidence": { "type": "array", "minItems": 1 } } } },
+        { "if": { "properties": { "state": { "const": "skipped" } }, "required": ["state"] }, "then": { "properties": { "verifiedAt": { "type": "string", "format": "date-time" }, "evidence": { "type": "array", "minItems": 1 } } } },
+        { "if": { "properties": { "state": { "enum": ["pending", "skipped"] } }, "required": ["state"] }, "then": { "properties": { "effective": { "type": "null" }, "integrity": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "enum": ["passed", "failed"] } }, "required": ["state"] }, "then": { "properties": { "effective": { "type": "object" } } } },
+        { "if": { "properties": { "state": { "const": "passed" } }, "required": ["state"] }, "then": { "properties": { "integrity": { "type": "object", "required": ["mutated"], "properties": { "mutated": { "const": false } } } } } }
+      ]
+    },
+    "v2ClaudeProfileMapping": {
+      "type": "object",
+      "required": ["profile", "effectiveWorkerArgs"],
+      "properties": {
+        "profile": { "$ref": "#/$defs/v2Profile" },
+        "effectiveWorkerArgs": { "type": "array", "items": { "type": "string" } },
+        "effectiveWorkerParams": false
+      },
+      "allOf": [
+        { "if": { "properties": { "profile": { "const": "host" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "properties": { "profile": { "const": "review-readonly" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "$ref": "#/$defs/reviewReadonlyArgs" } } } },
+        { "if": { "properties": { "profile": { "const": "standard" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "$ref": "#/$defs/standardArgs" } } } },
+        { "if": { "properties": { "profile": { "enum": ["trusted-autonomous", "sandbox-autonomous"] } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "$ref": "#/$defs/autonomousArgs" } } } }
+      ]
+    },
+    "v2CodexProfileMapping": {
+      "type": "object",
+      "required": ["profile", "effectiveWorkerParams"],
+      "properties": {
+        "profile": { "enum": ["host", "review-readonly", "trusted-autonomous"] },
+        "effectiveWorkerArgs": false,
+        "effectiveWorkerParams": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "profile": { "const": "host" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerParams": { "type": "object", "maxProperties": 0 } } } },
+        { "if": { "properties": { "profile": { "const": "review-readonly" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerParams": { "$ref": "#/$defs/v2CodexReadonlyParams" } } } },
+        { "if": { "properties": { "profile": { "const": "trusted-autonomous" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerParams": { "$ref": "#/$defs/v2CodexAutonomousParams" } } } }
+      ]
+    },
+    "v2CodexReadonlyParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox"],
+      "properties": { "sandbox": { "const": "read-only" } }
+    },
+    "v2CodexAutonomousParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox", "approvalPolicy"],
+      "properties": { "sandbox": { "const": "danger-full-access" }, "approvalPolicy": { "const": "never" } }
+    },
+    "v2Routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "reason"],
+      "properties": {
+        "source": { "enum": ["flag", "config", "extension", "host"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "warnings": {
+          "description": "Routing adjustments made after live discovery, for example an effort the resolved model does not support.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "model", "effort", "supported"],
+            "properties": {
+              "code": { "const": "effort-unsupported" },
+              "model": { "type": ["string", "null"], "minLength": 1 },
+              "effort": { "type": "string", "minLength": 1 },
+              "supported": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          }
+        }
+      }
+    },
+    "v2QuotaEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "observedAt", "reason", "resetsAt"],
+      "properties": {
+        "family": { "$ref": "#/$defs/v2Family" },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "reason": { "enum": ["rate-limited", "overage-detected"] },
+        "resetsAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "v2ExtensionDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "v2Repair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempt", "jobId", "findings", "plan", "verdict"],
+      "properties": {
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "jobId": { "$ref": "#/$defs/v1/properties/jobId" },
+        "findings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "plan": { "type": ["string", "null"], "minLength": 1 },
+        "verdict": { "enum": ["pending", "passed", "failed"] }
+      }
     }
   }
 }

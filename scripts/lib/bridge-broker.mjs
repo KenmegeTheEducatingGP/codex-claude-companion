@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { ORIGIN_BUSY } from "./bridge-delivery.mjs";
 import { createBridgeRuntime } from "./bridge-runtime.mjs";
 import { createProductionBridgeRepairLifecycle } from "./bridge-repair.mjs";
 import { readReceipt } from "./bridge-messaging.mjs";
@@ -9,6 +10,9 @@ import * as bridgeState from "./bridge-state.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+// The broker spec versions this release can run. A spec written by a newer
+// release is refused outright, so a downgrade can never misread it.
+const SUPPORTED_SPEC_VERSIONS = Object.freeze([1]);
 
 function privateRegularFile(file) {
   const stat = fs.lstatSync(file);
@@ -34,6 +38,13 @@ function safeError(error) {
 
 function validateSpec(spec) {
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("broker spec must be an object");
+  if (!SUPPORTED_SPEC_VERSIONS.includes(spec.schemaVersion)) {
+    const found = Object.hasOwn(spec, "schemaVersion") ? JSON.stringify(spec.schemaVersion) : "(missing)";
+    throw new Error(
+      `broker spec schemaVersion ${found} is not supported by this release ` +
+      `(supported: ${SUPPORTED_SPEC_VERSIONS.join(", ")}); finish or cancel this job with the release that created it`
+    );
+  }
   if (!/^ccb_[0-9A-HJKMNP-TV-Z]{26}$/.test(spec.jobId ?? "")) throw new Error("broker spec has an invalid job id");
   if (typeof spec.prompt !== "string" || spec.prompt.length === 0) throw new Error("broker spec requires a durable prompt");
   if (!CAPABILITY_PATTERN.test(spec.workerCapabilityToken ?? "")) throw new Error("broker spec requires a job-bound worker capability");
@@ -199,6 +210,13 @@ export async function runBridgeBroker(specInput, options = {}) {
     }
     if (outcome?.action === "delivery" && ["acknowledged", "deduplicated"].includes(outcome.classification)) {
       return { status: "settled", outcome, heartbeat };
+    }
+    if (outcome?.action === "delivery" && outcome.classification === "queued" &&
+        outcome.delivery?.reason === ORIGIN_BUSY) {
+      // The origin's Codex process holds its thread. Every retry from here would
+      // spawn an app-server that fails the same way, so the broker stops; the
+      // origin's next wait, status or delegate drains the queued result.
+      return { status: "queued", outcome, heartbeat };
     }
     if (outcome?.action === "terminal" && outcome?.classification === "settled") {
       return { status: "settled", outcome, heartbeat };

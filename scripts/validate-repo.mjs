@@ -56,6 +56,7 @@ const required = [
   "schemas/bridge-message-operation.schema.json",
   "schemas/bridge-result.schema.json",
   "schemas/bridge-receipt.schema.json",
+  "schemas/bridge-config.schema.json",
   "docs/bridge-capabilities.md",
   "docs/bridge-migration.md",
   "docs/bridge-runtime-compatibility.md"
@@ -86,6 +87,7 @@ JSON.parse(fs.readFileSync(path.join(root, "schemas/bridge-event.schema.json"), 
 JSON.parse(fs.readFileSync(path.join(root, "schemas/bridge-message-operation.schema.json"), "utf8"));
 JSON.parse(fs.readFileSync(path.join(root, "schemas/bridge-result.schema.json"), "utf8"));
 JSON.parse(fs.readFileSync(path.join(root, "schemas/bridge-receipt.schema.json"), "utf8"));
+JSON.parse(fs.readFileSync(path.join(root, "schemas/bridge-config.schema.json"), "utf8"));
 
 const bridgeMigration = fs.readFileSync(path.join(root, "docs/bridge-migration.md"), "utf8")
   .replace(/\r\n/g, "\n");
