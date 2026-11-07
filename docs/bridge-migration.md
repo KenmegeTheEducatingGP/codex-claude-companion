@@ -176,7 +176,8 @@ The bridge reads an optional JSON file from the first of these that applies:
 
 A missing file changes nothing. A present file must match
 `schemas/bridge-config.schema.json`; otherwise loading fails closed with
-`config_invalid_json`, `config_invalid` or `config_unreadable`. Older versions do
+`config_path_not_absolute` (a relative `CODEX_CLAUDE_CONFIG`),
+`config_unreadable`, `config_invalid_json` or `config_invalid`. Older versions do
 not read this file. Example:
 
 ```json
@@ -197,11 +198,13 @@ not read this file. Example:
 - `routing` maps a task family to a worker family, a model and an effort. A
   field left out, or `null`, is left to the host configuration.
 
-Routing resolves in this order: the config entry for the task family, then the
-first extension whose `resolveRouting` answers, else the host decides and the
-bridge sends no model or effort. When live Codex model discovery is available, a
-routed effort that the model does not list in `supportedReasoningEfforts` is
-dropped, with an `effort-unsupported` warning.
+Routing resolves in this order: the config entry for the task family supplies
+the initial values; then the first extension whose `resolveRouting` answers
+overrides, field by field, the fields its answer names, and the other fields keep
+the config values; with neither a config entry nor an answer, the host decides
+and the bridge sends no model or effort. When live Codex model discovery is
+available, a routed effort that the model does not list in
+`supportedReasoningEfforts` is dropped, with an `effort-unsupported` warning.
 
 ### Extensions
 

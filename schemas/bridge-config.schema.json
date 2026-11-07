@@ -51,7 +51,7 @@
         "additionalProperties": false,
         "minProperties": 1,
         "properties": {
-          "family": { "enum": ["claude", "codex"] },
+          "family": { "enum": ["claude", "codex", null] },
           "model": { "type": ["string", "null"], "minLength": 1 },
           "effort": { "type": ["string", "null"], "minLength": 1 }
         }
