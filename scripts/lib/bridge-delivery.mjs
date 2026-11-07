@@ -88,6 +88,22 @@ function conciseOriginPrompt(envelope) {
   ].join("\n")).slice(0, 1_200);
 }
 
+// A terminal result as the origin receives it, whichever route delivers it:
+// the concise text an origin resume carries and a queued inbox item stores.
+export function describeBridgeResult({ result, receipt, origin }) {
+  validateBridgeResultContract(result);
+  validateBridgeReceiptContract(receipt);
+  assertOrigin(origin);
+  if (result.jobId !== receipt.jobId) throw new Error("result and receipt job ids do not match");
+  const envelope = buildEnvelope(result, receipt, origin);
+  return Object.freeze({
+    jobId: result.jobId,
+    workerCompleted: envelope.workerCompleted,
+    verified: envelope.verified,
+    prompt: conciseOriginPrompt(envelope)
+  });
+}
+
 export function createCodexOriginAdapter(options = {}) {
   return async ({ cwd, resumeThreadId, prompt }) => {
     const runTurn = options.runTurn ?? (await import("../../plugins/codex/scripts/lib/codex.mjs")).runAppServerTurn;

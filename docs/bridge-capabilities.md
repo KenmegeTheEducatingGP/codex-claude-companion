@@ -131,8 +131,10 @@ order:
    job's origin thread) holds `jobs/<id>/waiter.lease`, refreshed while it waits.
    While that lease is live, the broker claims the delivery with
    `route: "waiter"` and never resumes the origin thread; the waiter
-   acknowledges the claim as it prints the result. A `wait` from any other
-   thread is an observer: it prints and never acknowledges.
+   acknowledges the claim as it prints the result. The plain-text output of that
+   `wait` carries the result itself (worker status, verification, summary, files,
+   tests, blockers), and `--json` carries it in `result` and `receipt`. A `wait`
+   from any other thread is an observer: it prints and never acknowledges.
 2. **Origin resume.** With no live waiter, the broker resumes the origin thread
    through the Codex app-server with no sandbox or approval override, so the
    delivery turn runs under the user's Codex configuration and leaves the
@@ -142,9 +144,14 @@ order:
    recorded as `origin-busy`: it spends none of the 64-attempt inbox quota, and
    the broker exits instead of retrying a thread that is in use. Other failures
    still count against the quota. The origin's next `wait`, `status` or
-   `delegate` prints its thread's queued results (a "queued results" block, or
-   `queuedResults` with `--json`) and acknowledges them before the automatic
-   recovery sweep, so a result delivered this way restarts no broker.
+   `delegate` prints its thread's queued results (a "Bridge results delivered"
+   block, or `queuedResults` with `--json`, which lists only other jobs' results
+   because the payload already carries its own job's). Those commands claim the
+   queued results when they are about to write their output, never when they
+   start: a command that times out, fails or is interrupted first leaves them
+   queued for the next one. While such a command runs, the automatic recovery
+   sweep leaves the queued jobs alone, so a result delivered this way restarts
+   no broker.
 
 The v1 receipt keeps `delivery.state: "pending"` while a result is queued; its
 schema is unchanged. `status --json` exposes the queue from the durable delivery

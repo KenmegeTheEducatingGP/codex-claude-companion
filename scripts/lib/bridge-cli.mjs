@@ -9,7 +9,7 @@ import { persistBridgeBrokerSpec } from "./bridge-broker.mjs";
 import { inspectBridgeRuntimeCompatibility } from "./bridge-runtime.mjs";
 import { buildBridgeRequest } from "./bridge-request.mjs";
 import * as bridgeState from "./bridge-state.mjs";
-import { drainBridgeInbox } from "./bridge-delivery.mjs";
+import { describeBridgeResult, drainBridgeInbox } from "./bridge-delivery.mjs";
 import {
   BRIDGE_WAITER_LEASE,
   createBridgeCoordinationOperations,
@@ -398,31 +398,56 @@ async function drainOriginQueue(coordination, origin, queued) {
   }
 }
 
-// Drains every queued result addressed to this Codex thread, bounded like
-// auto-recovery. It runs before auto-recovery, so a result delivered here never
-// restarts a broker.
-async function drainOriginThreadQueue(bridgeOptions, codexThreadId) {
-  const queued = [];
-  if (!codexThreadId) return queued;
+// Read-only scan of the inbox for one Codex thread: the origins, and the ids of
+// the jobs, whose result is queued for it. Nothing is claimed.
+function queuedForThread(bridgeOptions, codexThreadId) {
+  const found = { origins: new Map(), jobIds: new Set() };
+  if (!codexThreadId) return found;
   const coordination = originCoordination(bridgeOptions);
-  const origins = new Map();
   for (const jobId of listBridgeJobIds(bridgeOptions).reverse().slice(0, AUTO_RECOVERY_SCAN_LIMIT)) {
     try {
       const { origin } = bridgeState.readBridgeRequest(jobId, bridgeOptions);
       if (origin?.codexThreadId !== codexThreadId) continue;
       if (!["inbox", "inbox_claimed"].includes(coordination.readDelivery(jobId)?.state)) continue;
-      origins.set(JSON.stringify(origin), origin);
+      found.origins.set(JSON.stringify(origin), origin);
+      found.jobIds.add(jobId);
     } catch {
-      // An unreadable job is reported by status and list; the drain skips it.
+      // An unreadable job is reported by status and list; the scan skips it.
     }
   }
+  return found;
+}
+
+// Claims and acknowledges every result queued for this Codex thread, bounded
+// like auto-recovery. A command calls it immediately before it writes its
+// output, never at its start: the claim, the acknowledgement and the write are
+// one step, not separated by a wait, a timeout or a later failure. A command
+// that ends before that step has claimed nothing, and the results stay queued
+// for the next origin command.
+async function drainOriginThreadQueue(bridgeOptions, codexThreadId) {
+  const queued = [];
+  const { origins } = queuedForThread(bridgeOptions, codexThreadId);
+  if (origins.size === 0) return queued;
+  const coordination = originCoordination(bridgeOptions);
   for (const origin of origins.values()) await drainOriginQueue(coordination, origin, queued);
   return queued;
 }
 
+// The job's result as the origin receives it, read before an acknowledgement
+// so a result that cannot be described is never acknowledged.
+function describeDeliveredResult(jobId, origin, bridgeOptions) {
+  const brokerAuthority = bridgeState.getBridgeBrokerAuthority(jobId, bridgeOptions);
+  return describeBridgeResult({
+    result: bridgeState.readBridgeResult(jobId, bridgeOptions),
+    receipt: readReceipt(jobId, { ...bridgeOptions, brokerAuthority }),
+    origin
+  });
+}
+
 // The origin's own `wait` holds the job's waiter lease, which makes it the
 // delivery route: it acknowledges a waiter claim, or drains the job's queued
-// result, as it prints the result.
+// result, as it prints the result. What it delivers is added to `queued`, so the
+// output carries it in plain text as well as in --json.
 function createOriginWaiter(jobId, bridgeOptions, queued) {
   const coordination = originCoordination(bridgeOptions);
   const { origin } = bridgeState.readBridgeRequest(jobId, bridgeOptions);
@@ -437,10 +462,12 @@ function createOriginWaiter(jobId, bridgeOptions, queued) {
       }
       const delivery = coordination.readDelivery(jobId);
       if (leaseId !== null && delivery?.state === "claimed" && delivery.route === "waiter") {
+        const delivered = describeDeliveredResult(jobId, origin, bridgeOptions);
         const acknowledgedAt = new Date().toISOString();
         coordination.acknowledgeDelivery(jobId, delivery.deliveryClaimId, {
           route: "waiter", deliveredAt: acknowledgedAt, acknowledgedAt
         });
+        queued.push(delivered);
       } else if (delivery?.state === "inbox") {
         await drainOriginQueue(coordination, origin, queued);
       }
@@ -451,11 +478,18 @@ function createOriginWaiter(jobId, bridgeOptions, queued) {
   };
 }
 
+// `queued` holds the results this command delivers to the origin thread. In
+// --json the payload already carries the full result of its own job, so only
+// other jobs' results are listed under queuedResults.
 function outputWithQueuedResults(payload, queued, json, write) {
   if (queued.length === 0) return output(payload, json, write);
-  if (json) return output({ ...payload, queuedResults: queued }, json, write);
+  if (json) {
+    const carriedJobId = payload.result == null ? null : payload.jobId;
+    const others = queued.filter((entry) => entry.jobId !== carriedJobId);
+    return output(others.length === 0 ? payload : { ...payload, queuedResults: others }, json, write);
+  }
   (write ?? ((text) => process.stdout.write(text)))(
-    `Queued bridge results delivered to this Codex thread:\n${queued.map((entry) => redact(entry.prompt)).join("\n\n")}\n\n`
+    `Bridge results delivered to this Codex thread:\n${queued.map((entry) => redact(entry.prompt)).join("\n\n")}\n\n`
   );
   return output(payload, json, write);
 }
@@ -511,8 +545,10 @@ async function delegate(argv, deps) {
     settingSources: options["setting-sources"]
   });
   const bridgeOptions = stateOptions(options);
-  const queuedResults = await drainOriginThreadQueue(bridgeOptions, codexThreadId);
-  autoRecoverBridgeJobs(bridgeOptions, request.origin, deps);
+  // A result queued for this thread is claimed when the output below is
+  // written; until then recovery leaves its job alone instead of restarting its
+  // broker, and a delegate that fails first leaves the result queued.
+  autoRecoverBridgeJobs(bridgeOptions, request.origin, deps, queuedForThread(bridgeOptions, codexThreadId).jobIds);
   const created = bridgeState.createBridgeJob(request, bridgeOptions);
   const files = artifacts(request.jobId, bridgeOptions);
   const prompt = buildBridgeWorkerPrompt({ request, userPrompt });
@@ -545,14 +581,22 @@ async function delegate(argv, deps) {
     brokerPid: broker.pid,
     monitor: "detached durable broker",
     next: `codex-claude wait ${request.jobId}`
-  }, queuedResults, options.json, deps.write);
-  if (options.wait) return waitForJob(request.jobId, bridgeOptions, { json: options.json, originCaller: true }, deps);
+  }, await drainOriginThreadQueue(bridgeOptions, codexThreadId), options.json, deps.write);
+  if (options.wait) {
+    return waitForJob(request.jobId, bridgeOptions, { json: options.json, originCaller: true, threadId: codexThreadId }, deps);
+  }
   return 0;
 }
 
 async function waitForJob(jobId, bridgeOptions, options, deps = {}) {
-  const queued = [...(options.queuedResults ?? [])];
-  const emit = (payload) => outputWithQueuedResults(payload, queued, options.json, deps.write);
+  const queued = [];
+  // The origin's output is the delivery for the results queued for its thread.
+  // They are claimed here, immediately before the write and never earlier, so a
+  // wait that times out or is interrupted leaves them queued.
+  const emit = async (payload) => {
+    if (options.originCaller === true) queued.push(...await drainOriginThreadQueue(bridgeOptions, options.threadId));
+    return outputWithQueuedResults(payload, queued, options.json, deps.write);
+  };
   // Only the origin's own wait becomes the delivery route; any other caller
   // observes and never acknowledges.
   const originWaiter = options.originCaller === true ? createOriginWaiter(jobId, bridgeOptions, queued) : null;
@@ -560,11 +604,11 @@ async function waitForJob(jobId, bridgeOptions, options, deps = {}) {
     await originWaiter?.settle();
     const initial = snapshot(jobId, bridgeOptions);
     if (!TERMINAL.has(initial.status) && initial.pendingQuestionCount > 0) {
-      emit(initial);
+      await emit(initial);
       return 4;
     }
     if (snapshotSettled(initial)) {
-      emit(initial);
+      await emit(initial);
       if (initial.status !== "completed") return 3;
       return initial.receipt?.verification?.state === "passed" && initial.receipt?.delivery?.state === "acknowledged" ? 0 : 3;
     }
@@ -575,12 +619,12 @@ async function waitForJob(jobId, bridgeOptions, options, deps = {}) {
       await originWaiter?.settle();
       const current = snapshot(jobId, bridgeOptions);
       if (!TERMINAL.has(current.status) && current.pendingQuestionCount > 0) {
-        emit(current);
+        await emit(current);
         return 4;
       }
       if (TERMINAL.has(current.status) && current.result && current.status !== "completed" &&
           ["acknowledged", "failed"].includes(current.receipt?.delivery?.state)) {
-        emit(current);
+        await emit(current);
         return 3;
       }
       const verificationState = current.receipt?.verification?.state;
@@ -588,7 +632,7 @@ async function waitForJob(jobId, bridgeOptions, options, deps = {}) {
       if (current.status === "completed" && current.result &&
           ["passed", "failed"].includes(verificationState) &&
           ["acknowledged", "failed"].includes(deliveryState)) {
-        emit(current);
+        await emit(current);
         return verificationState === "passed" && deliveryState === "acknowledged" ? 0 : 3;
       }
       await (deps.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(250);
@@ -653,7 +697,7 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
   });
   const bridgeOptions = stateOptions(options);
   let originCaller = false;
-  let queuedResults = [];
+  let callerThreadId = null;
 
   if (command !== "recover" && command !== "gc") {
     const targetJobId = JOB_PATTERN.test(positionals[0] ?? "") ? positionals[0] : null;
@@ -661,18 +705,20 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
     if (targetJobId) {
       try { targetOrigin = bridgeState.readBridgeRequest(targetJobId, bridgeOptions).origin; } catch {}
     }
-    const callerThreadId = deps.codexThreadId ?? process.env.CODEX_THREAD_ID ?? null;
+    callerThreadId = deps.codexThreadId ?? process.env.CODEX_THREAD_ID ?? null;
     // The caller is the job's origin when its Codex thread is the one that
-    // delegated the job. Its wait and status receive the thread's queued
-    // results before auto-recovery, so a delivered result restarts no broker.
+    // delegated the job. Its wait and status print the thread's queued results
+    // in their own output, claiming them only when they write it. Until then
+    // recovery leaves those jobs alone, so a result delivered here restarts no
+    // broker, and a command that ends first leaves the results queued.
     originCaller = Boolean(callerThreadId) && targetOrigin?.codexThreadId === callerThreadId;
-    if (originCaller && (command === "wait" || command === "status")) {
-      queuedResults = await drainOriginThreadQueue(bridgeOptions, callerThreadId);
-    }
+    const excluded = originCaller && (command === "wait" || command === "status")
+      ? new Set(queuedForThread(bridgeOptions, callerThreadId).jobIds)
+      : new Set();
     let scope = deps.codexOrigin ?? targetOrigin;
     if (!scope && callerThreadId) scope = { codexThreadId: callerThreadId };
     const commandStartsTarget = new Set(["wait", "cancel", "send"]);
-    const excluded = targetJobId && commandStartsTarget.has(command) ? new Set([targetJobId]) : new Set();
+    if (targetJobId && commandStartsTarget.has(command)) excluded.add(targetJobId);
     autoRecoverBridgeJobs(bridgeOptions, scope, deps, excluded);
   }
 
@@ -790,9 +836,11 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
     return errors.length === 0 ? 0 : 3;
   }
   const jobId = requireJobId(positionals);
-  if (command === "wait") return waitForJob(jobId, bridgeOptions, { ...options, originCaller, queuedResults }, deps);
+  if (command === "wait") return waitForJob(jobId, bridgeOptions, { ...options, originCaller, threadId: callerThreadId }, deps);
   if (command === "status") {
-    outputWithQueuedResults(snapshot(jobId, bridgeOptions, { tolerateReceiptError: true }), queuedResults, options.json, deps.write);
+    // Drain before the snapshot, so a queued job's own status already shows it delivered.
+    const delivered = originCaller ? await drainOriginThreadQueue(bridgeOptions, callerThreadId) : [];
+    outputWithQueuedResults(snapshot(jobId, bridgeOptions, { tolerateReceiptError: true }), delivered, options.json, deps.write);
     return 0;
   }
   if (command === "logs") {

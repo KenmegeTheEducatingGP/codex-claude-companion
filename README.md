@@ -120,12 +120,14 @@ timeout is an operational error and exits nonzero with a diagnostic.
 
 Run `wait` from the Codex session that delegated the job (its `CODEX_THREAD_ID`
 equals the job's origin thread) to receive the result there: that `wait` holds
-the job's waiter lease and acknowledges delivery as it prints the result. Any
-other caller only observes. If the origin was busy and no `wait` was running,
-the result is queued: `status --json` shows `deliveryQueue: "inbox"` and
-`lastError: "origin-busy"`, and the origin's next `wait`, `status` or `delegate`
-prints the queued results and acknowledges them. Workers and the verifier
-inherit `CLAUDE_CONFIG_DIR` and `CODEX_HOME` when they are set.
+the job's waiter lease and acknowledges delivery as it prints the result, in plain
+text as well as in `--json`. Any other caller only observes. If the origin was
+busy and no `wait` was running, the result is queued: `status --json` shows
+`deliveryQueue: "inbox"` and `lastError: "origin-busy"`, and the origin's next
+`wait`, `status` or `delegate` prints the queued results and acknowledges them
+when it writes its output. A command that times out, fails or is interrupted
+first leaves them queued. Workers and the verifier inherit `CLAUDE_CONFIG_DIR`
+and `CODEX_HOME` when they are set.
 
 `send` provides live same-session steering only while the authoritative Claude
 worker is still running. The first authoritative result closes that input

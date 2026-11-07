@@ -29,9 +29,11 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   exiting `0` for verified work. With a busy origin and no waiter, the result is
   queued as `origin-busy` without spending the 64-attempt inbox quota, the
   broker exits instead of retrying, and the origin's next `wait`, `status` or
-  `delegate` prints and acknowledges it. `status --json` shows `deliveryQueue`
-  and `lastError`; the v1 receipt keeps `delivery.state: "pending"` while a
-  result is queued.
+  `delegate` prints and acknowledges it when it writes its output; a command that
+  times out, fails or is interrupted first leaves the result queued. The
+  origin's plain-text `wait` prints the result it delivers, not only `--json`.
+  `status --json` shows `deliveryQueue` and `lastError`; the v1 receipt keeps
+  `delivery.state: "pending"` while a result is queued.
 - Workers and the independent verifier now receive `CLAUDE_CONFIG_DIR` and
   `CODEX_HOME` when they are set, so they run under the caller's Claude and Codex
   homes instead of the defaults. The runner identity records only the home
