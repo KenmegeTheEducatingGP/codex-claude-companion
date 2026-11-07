@@ -4,6 +4,12 @@
 // `{ apiVersion: 1, name, ...hooks }`. Extensions carry the same trust as the CLI,
 // and loading fails closed: a bad path, a failed import, a wrong apiVersion or an
 // unknown key stops the delegation before anything is launched.
+//
+// An extension is ONE self-contained module. Its sha256 is the integrity signal a
+// recovered job compares, so it must cover all the code the extension runs: the
+// loader imports exactly the bytes it hashed, a module made of those bytes has no
+// location to resolve another file against, and an import of anything but a node:
+// module fails closed at load.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -59,6 +65,18 @@ function validateDefinition(file, definition) {
   }
 }
 
+// The message for a failed import. Node's own text for a refused local import quotes the whole
+// encoded module, so it is replaced by one that names the import and the rule.
+function importFailure(file, cause) {
+  const message = cause?.message ?? String(cause);
+  if (cause?.code === "ERR_UNSUPPORTED_RESOLVE_REQUEST") {
+    const specifier = /Failed to resolve module specifier "([^"]+)"/.exec(message)?.[1];
+    return `Extension ${file} imports ${specifier === undefined ? "another file or package" : JSON.stringify(specifier)}; ` +
+      "an extension must be one self-contained module (import only node: modules), so its digest covers all the code it runs.";
+  }
+  return `Extension ${file} failed to import: ${message}`;
+}
+
 async function loadOne(file) {
   if (typeof file !== "string" || !path.isAbsolute(file)) {
     throw loadFailed(`Extension path ${JSON.stringify(file)} must be an absolute path.`);
@@ -72,10 +90,13 @@ async function loadOne(file) {
   const sha256 = crypto.createHash("sha256").update(source).digest("hex");
   let module;
   try {
-    // The digest in the URL makes changed content a new module rather than a cached one.
-    module = await import(`${pathToFileURL(file).href}?sha256=${sha256}`);
+    // Import the bytes that were hashed, never the file again, so the digest identifies the code
+    // that runs and changed content is a new module rather than a cached one. The sourceURL
+    // comment keeps an error's stack naming the extension's own file.
+    const code = Buffer.concat([source, Buffer.from(`\n//# sourceURL=${pathToFileURL(file).href}\n`)]);
+    module = await import(`data:text/javascript;base64,${code.toString("base64")}`);
   } catch (cause) {
-    throw loadFailed(`Extension ${file} failed to import: ${cause?.message ?? String(cause)}`, cause);
+    throw loadFailed(importFailure(file, cause), cause);
   }
   const definition = module.default;
   validateDefinition(file, definition);
@@ -105,14 +126,20 @@ export async function loadBridgeExtensions(paths) {
   return Object.freeze(extensions);
 }
 
-/** The digest record a broker spec and a receipt keep for each loaded extension. */
+/** The digest descriptor a v2 receipt keeps for each loaded extension: its name and sha256, never a local path. */
 export function describeBridgeExtensions(extensions) {
+  return extensions.map(({ name, sha256 }) => ({ name, sha256 }));
+}
+
+/** The record a broker keeps to re-import its extensions for a recovered job: name, path and sha256. */
+export function recordBridgeExtensions(extensions) {
   return extensions.map(({ name, path: file, sha256 }) => ({ name, path: file, sha256 }));
 }
 
 /**
- * Re-import recorded extensions, for a recovered job. A changed file is imported
- * afresh and reported in `changed`, so the caller can record it as an event.
+ * Re-import recorded extensions (the records `recordBridgeExtensions` makes), for a
+ * recovered job. A changed file is imported afresh and reported in `changed`, so the
+ * caller can record it as an event.
  */
 export async function reloadBridgeExtensions(recorded) {
   if (!Array.isArray(recorded) || recorded.some((entry) => !isPlainObject(entry))) {

@@ -30,7 +30,17 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   `standard` stays Claude-only.
 - An optional config file (`schemas/bridge-config.schema.json`) sets defaults,
   per-preset profiles and routing by task family. Extension API v1 loads local
-  modules from absolute paths, records their sha256 and fails closed.
+  modules from absolute paths (POSIX, Windows drive or UNC), records their
+  sha256 and fails closed. An extension is one self-contained module: the loader
+  runs exactly the bytes it hashes and refuses an import of any other file or
+  package, so the digest a recovered job compares covers everything the
+  extension runs.
+- A v2 result requires the worker's native session once the job completed (a
+  UUID for Claude), and a v2 receipt requires the effective settings once the
+  worker completed or the verification finished. The extension digests a
+  receipt keeps are name and sha256 only; the broker's recovery record keeps the
+  path. A routing rule that leaves the family to the host has its Codex effort
+  checked against `defaults.workerFamily`.
 - The command-line flags that use these arrive in a later change; until then
   every command keeps writing the 1.x contracts.
 - Fixed: a trust profile name that matches an object prototype key, such as

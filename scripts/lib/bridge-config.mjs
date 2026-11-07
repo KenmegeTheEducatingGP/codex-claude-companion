@@ -178,6 +178,8 @@ export async function resolveRouting(config, extensions, { request = null, taskF
     break;
   }
 
-  const family = routing.family ?? request?.worker?.family ?? null;
+  // The family that will run the job: the rule's own, else the request's, else the configured
+  // default, so a rule that names only a model or an effort still gets its Codex effort checked.
+  const family = routing.family ?? request?.worker?.family ?? config?.defaults?.workerFamily ?? null;
   return deepFreeze(checkCodexEffort(routing, family, available));
 }

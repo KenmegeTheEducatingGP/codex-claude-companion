@@ -117,14 +117,21 @@ is now a `oneOf` union on `schemaVersion`:
   - a verifier that is always the other family;
   - the task family, a `continuesJobId` and the routing provenance
     (`flag`, `config`, `extension` or `host`, with a reason).
-- A v2 result names `workerFamily` and `workerSessionId` (the Claude session id
-  or the Codex thread id) instead of `claudeSessionId`, and may carry a `plan`.
+- A v2 result names `workerFamily` and `workerSessionId` (the Claude session id,
+  a UUID, or the Codex thread id) instead of `claudeSessionId`, and may carry a
+  `plan`. A completed result always names the session, so messaging and
+  continuation can find the worker; only a job that failed or was cancelled
+  before a session existed carries `null`.
 - A v2 receipt adds:
-  - the effective worker and verifier settings as each reported them;
+  - the effective worker and verifier settings as each reported them: `null`
+    until the worker reports, and for a worker that failed or was cancelled
+    first, but always recorded once the worker completed or the verification
+    passed or failed (a member is `null` only where that family reports none);
   - the delivery route (`waiter`, `origin` or `inbox`) and the `queued` state;
   - a verifier integrity record: a passed verification requires
     `integrity.mutated: false`;
-  - quota events, extension digests, the continuation and repair attempts.
+  - quota events, extension digests (name and sha256 only, never a local path),
+    the continuation and repair attempts.
 - In v2, events and message operations can come from either family. The
   validators check each author against the job's origin and worker families:
   a `question` comes from the worker, a pending message from the origin, and an
@@ -197,6 +204,10 @@ not read this file. Example:
   behaviour); it never grants `trusted-autonomous`.
 - `routing` maps a task family to a worker family, a model and an effort. A
   field left out, or `null`, is left to the host configuration.
+- `extensions` lists absolute paths: POSIX (`/opt/x.mjs`), a Windows drive
+  (`C:\x.mjs`, `C:/x.mjs`) or UNC (`\\server\share\x.mjs`). The schema checks only
+  that a path has an absolute form; the loader requires it to be absolute on the
+  platform it runs on.
 
 Routing resolves in this order: the config entry for the task family supplies
 the initial values; then the first extension whose `resolveRouting` answers
@@ -204,12 +215,16 @@ overrides, field by field, the fields its answer names, and the other fields kee
 the config values; with neither a config entry nor an answer, the host decides
 and the bridge sends no model or effort. When live Codex model discovery is
 available, a routed effort that the model does not list in
-`supportedReasoningEfforts` is dropped, with an `effort-unsupported` warning.
+`supportedReasoningEfforts` is dropped, with an `effort-unsupported` warning. The
+model checked is the routed one, else the Codex default model, for a job whose
+worker family is the rule's own, else the request's, else `defaults.workerFamily`.
 
 ### Extensions
 
 An extension is a local module named by absolute path in `extensions`. Its
-default export is `{ apiVersion: 1, name, ...hooks }`:
+default export is `{ apiVersion: 1, name, ...hooks }`. It is one self-contained
+ES module: it may import `node:` modules and nothing else, so one file holds all
+the code it runs (`import.meta.url` is not a file location):
 
 | Hook | Called with | Returns | On failure |
 |---|---|---|---|
@@ -220,10 +235,13 @@ default export is `{ apiVersion: 1, name, ...hooks }`:
 | `observe` | `event` | nothing | Reported and ignored; never fatal |
 
 Loading fails closed with `extension-load-failed` for a relative or missing
-path, a failed import, a wrong `apiVersion`, a missing name, an unknown key or a
-duplicate name. The loader records each file's sha256. A recovered job imports
-the file again and reports any digest change, so changed code never runs
-unnoticed. Extensions carry the same trust as the command-line tool itself.
+path, a failed import, an import of another file or package, a wrong
+`apiVersion`, a missing name, an unknown key or a duplicate name. The loader
+imports exactly the bytes it hashes and records that sha256, which therefore
+covers everything the extension runs. A receipt keeps each extension's name and
+sha256; the broker keeps the path as well (`recordBridgeExtensions`). A recovered
+job imports the file again and reports any digest change, so changed code never
+runs unnoticed. Extensions carry the same trust as the command-line tool itself.
 
 ### Rollback
 

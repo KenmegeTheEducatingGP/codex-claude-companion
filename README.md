@@ -392,8 +392,9 @@ readable.
   family. A missing file changes nothing, and an invalid one fails closed.
 - **Extensions.** Local modules listed by absolute path in the config file can
   route models, check a resolved model, pick an account home, add required
-  verification checks and observe events. Loading fails closed, and each
-  module's sha256 is recorded.
+  verification checks and observe events. An extension is one self-contained
+  module (it may import `node:` modules only). Loading fails closed, and each
+  module's sha256, which covers everything it runs, is recorded.
 
 See [the migration contract](docs/bridge-migration.md) for the profile table,
 the config keys and the extension API.

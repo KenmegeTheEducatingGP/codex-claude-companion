@@ -58,10 +58,10 @@
       }
     },
     "extensions": {
-      "description": "Absolute paths of extension modules, loaded in order. A module that fails to load fails the delegation before launch.",
+      "description": "Absolute paths of extension modules, loaded in order: a POSIX path, a Windows drive path or a UNC path. The schema only checks that a path has an absolute form; the loader requires it to be absolute on the platform it runs on. A module that fails to load fails the delegation before launch.",
       "type": "array",
       "uniqueItems": true,
-      "items": { "type": "string", "pattern": "^/" }
+      "items": { "type": "string", "pattern": "^(/|[A-Za-z]:[\\\\/]|\\\\\\\\)" }
     }
   }
 }

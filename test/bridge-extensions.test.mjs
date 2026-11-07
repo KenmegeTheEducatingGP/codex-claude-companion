@@ -15,6 +15,7 @@ import {
   describeBridgeExtensions,
   loadBridgeExtensions,
   notifyExtensionObservers,
+  recordBridgeExtensions,
   reloadBridgeExtensions,
   selectExtensionAccount
 } from "../scripts/lib/bridge-extensions.mjs";
@@ -50,7 +51,8 @@ test("an extension loads from an absolute path with its sha256 recorded", async 
   assert.equal(extension.sha256, sha256File(file));
   assert.equal(typeof extension.hooks.observe, "function");
   assert.ok(Object.isFrozen(extension) && Object.isFrozen(extension.hooks));
-  assert.deepEqual(describeBridgeExtensions([extension]), [{ name: "example", path: file, sha256: sha256File(file) }]);
+  assert.deepEqual(recordBridgeExtensions([extension]), [{ name: "example", path: file, sha256: sha256File(file) }]);
+  assert.deepEqual(describeBridgeExtensions([extension]), [{ name: "example", sha256: sha256File(file) }], "a receipt keeps the name and digest, never a local path");
   assert.deepEqual(await loadBridgeExtensions([]), []);
 });
 
@@ -77,7 +79,7 @@ test("extension loading fails closed with extension-load-failed", async () => {
 
 test("a recovered job re-imports its extensions and reports a changed digest", async () => {
   const file = writeExtension(`export default { apiVersion: 1, name: "drift" };`);
-  const recorded = describeBridgeExtensions(await loadBridgeExtensions([file]));
+  const recorded = recordBridgeExtensions(await loadBridgeExtensions([file]));
   const unchanged = await reloadBridgeExtensions(recorded);
   assert.deepEqual(unchanged.changed, []);
   fs.writeFileSync(file, `export default { apiVersion: 1, name: "drift", observe() {} };`);

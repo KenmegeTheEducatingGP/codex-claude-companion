@@ -148,6 +148,7 @@
         { "if": { "properties": { "workerState": { "const": "failed" } }, "required": ["workerState"] }, "then": { "properties": { "workerError": { "type": "string", "minLength": 1 } } }, "else": { "properties": { "workerError": { "type": "null" } } } },
         { "if": { "properties": { "workerState": { "enum": ["accepted", "running", "stalled"] } }, "required": ["workerState"] }, "then": { "properties": { "delivery": { "type": "object", "properties": { "state": { "enum": ["pending", "failed"] } } } } } },
         { "if": { "properties": { "verification": { "type": "object", "properties": { "state": { "enum": ["passed", "failed"] } }, "required": ["state"] } }, "required": ["verification"] }, "then": { "properties": { "workerState": { "const": "completed" } } } },
+        { "if": { "properties": { "workerState": { "const": "completed" } }, "required": ["workerState"] }, "then": { "properties": { "worker": { "type": "object", "properties": { "effective": { "type": "object" } } } } } },
         {
           "if": { "$ref": "#/$defs/v2WhenClaudeWorker" },
           "then": {
@@ -195,7 +196,7 @@
       "required": ["family", "effective"],
       "properties": {
         "family": { "$ref": "#/$defs/v2Family" },
-        "effective": { "anyOf": [{ "$ref": "#/$defs/v2Effective" }, { "type": "null" }], "description": "Null until the worker reports its settings." }
+        "effective": { "anyOf": [{ "$ref": "#/$defs/v2Effective" }, { "type": "null" }], "description": "Null until the worker reports its settings, and for a worker that failed or was cancelled before it did. A completed worker always has the record (its members are null only where the family reports none)." }
       }
     },
     "v2Delivery": {
@@ -243,6 +244,7 @@
         { "if": { "properties": { "state": { "enum": ["passed", "failed"] } }, "required": ["state"] }, "then": { "properties": { "verifiedAt": { "type": "string", "format": "date-time" }, "evidence": { "type": "array", "minItems": 1 } } } },
         { "if": { "properties": { "state": { "const": "skipped" } }, "required": ["state"] }, "then": { "properties": { "verifiedAt": { "type": "string", "format": "date-time" }, "evidence": { "type": "array", "minItems": 1 } } } },
         { "if": { "properties": { "state": { "const": "pending" } }, "required": ["state"] }, "then": { "properties": { "effective": { "type": "null" }, "integrity": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "enum": ["passed", "failed"] } }, "required": ["state"] }, "then": { "properties": { "effective": { "type": "object" } } } },
         { "if": { "properties": { "state": { "const": "passed" } }, "required": ["state"] }, "then": { "properties": { "integrity": { "type": "object", "required": ["mutated"], "properties": { "mutated": { "const": false } } } } } }
       ]
     },

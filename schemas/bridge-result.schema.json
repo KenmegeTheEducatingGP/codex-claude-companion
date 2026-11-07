@@ -128,11 +128,15 @@
         "testsRun": { "$ref": "#/$defs/v1/properties/testsRun" },
         "findings": { "$ref": "#/$defs/v1/properties/findings" },
         "blockers": { "$ref": "#/$defs/v1/properties/blockers" },
-        "workerSessionId": { "type": ["string", "null"], "minLength": 1, "description": "The worker's native session: the Claude session id or the Codex thread id." },
+        "workerSessionId": { "type": ["string", "null"], "minLength": 1, "description": "The worker's native session: the Claude session id (a UUID) or the Codex thread id. Required once the job completed; null only for a job that failed or was cancelled before a session existed." },
         "plan": { "type": ["string", "null"], "minLength": 1, "description": "The worker's stated plan; a repair attempt must state one before any edit." },
         "exitStatus": { "$ref": "#/$defs/v1/properties/exitStatus" },
         "artifactPaths": { "$ref": "#/$defs/v1/properties/artifactPaths" }
-      }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] }, "then": { "properties": { "workerSessionId": { "type": "string" } } } },
+        { "if": { "properties": { "workerFamily": { "const": "claude" } }, "required": ["workerFamily"] }, "then": { "properties": { "workerSessionId": { "anyOf": [{ "type": "null" }, { "type": "string", "format": "uuid" }] } } } }
+      ]
     }
   }
 }
