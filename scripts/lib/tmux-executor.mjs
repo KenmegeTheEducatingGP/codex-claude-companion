@@ -7,9 +7,13 @@ import { validateBridgeRequestContract } from "./bridge-contracts.mjs";
 import { initializeBridgeInput } from "./bridge-input.mjs";
 
 const JOB_ID_PATTERN = /^ccb_[0-9A-HJKMNP-TV-Z]{26}$/;
+// CLAUDE_CONFIG_DIR and CODEX_HOME are non-secret paths that select the
+// delegating session's own account home; without them the worker silently
+// falls back to the default home (another account, settings and quota).
 const ENV_ALLOWLIST = new Set([
   "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM",
   "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+  "CLAUDE_CONFIG_DIR", "CODEX_HOME",
   "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
 ]);
 const RUNNER_PATH = fileURLToPath(new URL("./claude-runner.mjs", import.meta.url));
