@@ -697,6 +697,21 @@ test("v2 receipts record the effective settings once the worker has completed or
   }
 });
 
+test("a skipped verification ran no verifier, so it carries no verifier settings and no integrity record", () => {
+  const skipped = v2Receipt();
+  skipped.verification = { state: "skipped", verifiedAt: "2026-07-18T12:03:00Z", evidence: ["no verifier available"], verifierFamily: "codex", effective: null, integrity: null };
+  accepts(validateBridgeReceiptContract, skipped, "a skipped verification records that nothing ran");
+
+  for (const [label, mutate] of [
+    ["stale effective settings", (candidate) => { candidate.verification.effective = emptyEffective(); }],
+    ["a stale integrity record", (candidate) => { candidate.verification.integrity = { mutated: false }; }]
+  ]) {
+    const invalid = structuredClone(skipped);
+    mutate(invalid);
+    rejects(validateBridgeReceiptContract, invalid, undefined, `a skipped verification with ${label} is a contradictory audit record`);
+  }
+});
+
 test("the extension digests a v2 receipt keeps carry no path, and the recovery record keeps it", async () => {
   const { describeBridgeExtensions, loadBridgeExtensions, recordBridgeExtensions, reloadBridgeExtensions } = bridgeExtensions;
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-receipt-")), "extension.mjs");

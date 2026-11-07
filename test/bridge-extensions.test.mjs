@@ -184,6 +184,52 @@ test("a static import by absolute file: URL is refused at load, like a relative 
   assert.equal(plain.name, "plain", "a commented-out import and import-like text inside a string are not imports");
 });
 
+// The loader decides from the source whether a static import names an absolute file: URL, so it has
+// to know what is code. Text that only looks like an import, in a string, a template or a comment,
+// is not one, wherever in the line it sits.
+test("import-like text in a string, a template or a comment is not an import", async () => {
+  const text = "import helper from 'file:///example.mjs'";
+  const hook = `export default { apiVersion: 1, name: "text", observe() { return note; } };`;
+  const forms = {
+    "a string after a brace": `const note = { text: "{ ${text}" };\n${hook}`,
+    "a string after a semicolon": `const note = "a; ${text}";\n${hook}`,
+    "a single-quoted string with an escaped quote": `const note = 'it\\'s; import helper from "file:///example.mjs"';\n${hook}`,
+    "a template line": `const note = \`\n${text}\n\`;\n${hook}`,
+    "a template inside a template substitution": `const note = \`a \${ \`\n${text}\n\` } b\`;\n${hook}`,
+    "a block comment": `/*\n ${text}\n*/\nconst note = 1;\n${hook}`,
+    "a line comment": `// ${text}\nconst note = 1;\n${hook}`,
+    "a string after a regular expression holding a quote": `const quote = /'/;\nconst note = "{ ${text}" + quote;\n${hook}`,
+    "a string after a division": `const half = 4 / 2;\nconst note = "{ ${text}" + half;\n${hook}`
+  };
+  for (const [label, source] of Object.entries(forms)) {
+    const [loaded] = await loadBridgeExtensions([writeExtension(source)]);
+    assert.equal(loaded.name, "text", `${label} is text, not an import`);
+  }
+});
+
+// Comments may sit anywhere in an import: in front of it, between its tokens, inside a re-export.
+test("a static import by absolute file: URL is refused wherever a comment sits in the statement", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-comment-import-"));
+  const helper = path.join(dir, "helper.mjs");
+  fs.writeFileSync(helper, `export const helper = () => "v1";\nexport const other = () => "v2";\nexport default helper;`);
+  const url = JSON.stringify(pathToFileURL(helper).href);
+  const tail = `export default { apiVersion: 1, name: "outside", observe() {} };`;
+  const forms = {
+    "a block comment before the import on its line": `/* helper */ import { helper } from ${url};\n${tail}`,
+    "comments between the tokens of an import": `import/* a */{ helper }/* b */from/* c */${url};\n${tail}`,
+    "a comment inside a re-export": `export * from /* helper */ ${url};\n${tail}`,
+    "a multi-line import with comments": `import {\n  helper, // the helper\n  other /* unused */\n} from ${url};\n${tail}`,
+    "a default and a named import": `import main, { helper } from ${url};\n${tail}`,
+    "a namespace re-export": `export * as everything from ${url};\n${tail}`,
+    "an import after code, with no semicolons": `const early = 1\nimport { helper } from ${url}\n${tail}`
+  };
+  for (const [label, source] of Object.entries(forms)) {
+    await assert.rejects(loadBridgeExtensions([writeExtension(source)]), (error) =>
+      loadFailure(/self-contained/)(error) && error.message.includes(url) && error.message.length < 600,
+    `${label}: refused at load, and the message names the import`);
+  }
+});
+
 // Guard, green at base: whatever the loader does with the bytes, an error thrown by
 // an extension must still name the extension's file in its stack.
 test("an error thrown by an extension names the extension's file in its stack", async () => {
