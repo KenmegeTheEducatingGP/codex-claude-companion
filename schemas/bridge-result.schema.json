@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-result.schema.json",
   "title": "Codex-Claude Bridge result",
+  "description": "Structured worker outcome, versioned by schemaVersion. Completion here does not imply delivery, acknowledgement, or verification. schemaVersion 2 names the worker family and replaces claudeSessionId with workerSessionId.",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": { "schemaVersion": { "enum": [1, 2] } },
+  "oneOf": [{ "$ref": "#/$defs/v1" }, { "$ref": "#/$defs/v2" }],
+  "$defs": {
+  "v1": {
+  "title": "Codex-Claude Bridge result",
   "description": "Structured worker outcome. Completion here does not imply delivery, acknowledgement, or verification.",
   "type": "object",
   "additionalProperties": false,
@@ -59,8 +67,8 @@
       "type": "array",
       "items": { "type": "string", "pattern": "^/" }
     }
+  }
   },
-  "$defs": {
     "commandEvidence": {
       "type": "object",
       "additionalProperties": false,
@@ -89,6 +97,46 @@
         "title": { "type": "string", "minLength": 1 },
         "detail": { "type": "string", "minLength": 1 }
       }
+    },
+    "v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "jobId",
+        "workerFamily",
+        "status",
+        "summary",
+        "filesChanged",
+        "commandsRun",
+        "testsRun",
+        "findings",
+        "blockers",
+        "workerSessionId",
+        "plan",
+        "exitStatus",
+        "artifactPaths"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "jobId": { "$ref": "#/$defs/v1/properties/jobId" },
+        "workerFamily": { "enum": ["claude", "codex"] },
+        "status": { "$ref": "#/$defs/v1/properties/status" },
+        "summary": { "$ref": "#/$defs/v1/properties/summary" },
+        "filesChanged": { "$ref": "#/$defs/v1/properties/filesChanged" },
+        "commandsRun": { "$ref": "#/$defs/v1/properties/commandsRun" },
+        "testsRun": { "$ref": "#/$defs/v1/properties/testsRun" },
+        "findings": { "$ref": "#/$defs/v1/properties/findings" },
+        "blockers": { "$ref": "#/$defs/v1/properties/blockers" },
+        "workerSessionId": { "type": ["string", "null"], "minLength": 1, "description": "The worker's native session: the Claude session id (a UUID) or the Codex thread id. Required once the job completed; null only for a job that failed or was cancelled before a session existed." },
+        "plan": { "type": ["string", "null"], "minLength": 1, "description": "The worker's stated plan; a repair attempt must state one before any edit." },
+        "exitStatus": { "$ref": "#/$defs/v1/properties/exitStatus" },
+        "artifactPaths": { "$ref": "#/$defs/v1/properties/artifactPaths" }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] }, "then": { "properties": { "workerSessionId": { "type": "string" } } } },
+        { "if": { "properties": { "workerFamily": { "const": "claude" } }, "required": ["workerFamily"] }, "then": { "properties": { "workerSessionId": { "anyOf": [{ "type": "null" }, { "type": "string", "format": "uuid" }] } } } }
+      ]
     }
   }
 }

@@ -20,6 +20,50 @@ const READONLY_PERMISSION_ARGS = Object.freeze([
 const STANDARD_PERMISSION_ARGS = Object.freeze(["--permission-mode", "default"]);
 const AUTONOMOUS_PERMISSION_ARGS = Object.freeze(["--permission-mode", "bypassPermissions"]);
 
+// Codex thread parameters. These are the only places the bridge names a Codex sandbox
+// or approval value; every other path omits the keys so the host configuration decides.
+const CODEX_READONLY_PARAMS = Object.freeze({ sandbox: "read-only" });
+const CODEX_AUTONOMOUS_PARAMS = Object.freeze({ sandbox: "danger-full-access", approvalPolicy: "never" });
+
+const SANDBOX_UNAVAILABLE = "executor-owned provenance verification is not implemented";
+
+/** Worker and verifier families a schemaVersion 2 request can name. */
+export const BRIDGE_FAMILIES = Object.freeze(["claude", "codex"]);
+
+/**
+ * The schemaVersion 2 profile table. `claudeArgs` are the exact Claude argv, `codexParams`
+ * the exact Codex thread parameters (null where the profile is not available for Codex),
+ * and `permissionMode` the Claude permission mode the profile sets (null for host).
+ * `host` passes nothing, so the host configuration decides.
+ */
+export const BRIDGE_PROFILES = Object.freeze({
+  host: Object.freeze({
+    permissionMode: null,
+    claudeArgs: Object.freeze([]),
+    codexParams: Object.freeze({})
+  }),
+  "review-readonly": Object.freeze({
+    permissionMode: "default",
+    claudeArgs: READONLY_PERMISSION_ARGS,
+    codexParams: CODEX_READONLY_PARAMS
+  }),
+  standard: Object.freeze({
+    permissionMode: "default",
+    claudeArgs: STANDARD_PERMISSION_ARGS,
+    codexParams: null
+  }),
+  "trusted-autonomous": Object.freeze({
+    permissionMode: "bypassPermissions",
+    claudeArgs: AUTONOMOUS_PERMISSION_ARGS,
+    codexParams: CODEX_AUTONOMOUS_PARAMS
+  }),
+  "sandbox-autonomous": Object.freeze({
+    permissionMode: "bypassPermissions",
+    claudeArgs: AUTONOMOUS_PERMISSION_ARGS,
+    codexParams: null
+  })
+});
+
 export const BRIDGE_TRUST_PROFILES = Object.freeze({
   "review-readonly": Object.freeze({
     permissionMode: "default",
@@ -116,7 +160,7 @@ function validateSandboxAttestation(profile, options) {
     return null;
   }
   throw new Error(
-    `Bridge trust profile "${profile}" is unavailable: executor-owned provenance verification is not implemented.`
+    `Bridge trust profile "${profile}" is unavailable: ${SANDBOX_UNAVAILABLE}.`
   );
 }
 
@@ -132,15 +176,40 @@ function validateRequestedTools(profile, requestedTools) {
   }
 }
 
-export function resolveBridgePolicy(options = {}) {
-  const profileName = options.profile;
-  const profile = BRIDGE_TRUST_PROFILES[profileName];
+/**
+ * Resolve a schemaVersion 2 profile for one family: the exact Claude argv for a Claude
+ * worker or verifier, or the exact Codex thread params for a Codex one.
+ *
+ * @param {string} profileName a key of BRIDGE_PROFILES
+ * @param {"claude"|"codex"} family
+ * @returns {{profile: string, family: string, workerArgs: string[]|null, workerParams: object|null}} deep-frozen
+ */
+export function resolveFamilyProfile(profileName, family) {
+  if (!BRIDGE_FAMILIES.includes(family)) {
+    throw new Error(`Unknown worker family "${String(family)}". Allowed families: ${BRIDGE_FAMILIES.join(", ")}.`);
+  }
+  const profile = Object.hasOwn(BRIDGE_PROFILES, profileName) ? BRIDGE_PROFILES[profileName] : undefined;
   if (!profile) {
     throw new Error(
-      `Unknown bridge trust profile "${String(profileName)}". Allowed profiles: ${Object.keys(BRIDGE_TRUST_PROFILES).join(", ")}.`
+      `Unknown bridge profile "${String(profileName)}". Allowed profiles: ${Object.keys(BRIDGE_PROFILES).join(", ")}.`
     );
   }
+  if (profileName === "sandbox-autonomous") {
+    throw new Error(`Bridge profile "${profileName}" is unavailable: ${SANDBOX_UNAVAILABLE}.`);
+  }
+  if (family === "codex" && profile.codexParams === null) {
+    const available = Object.keys(BRIDGE_PROFILES).filter((name) => BRIDGE_PROFILES[name].codexParams !== null);
+    throw new Error(`Bridge profile "${profileName}" is not available for codex; choose one of: ${available.join(", ")}.`);
+  }
+  return deepFreeze({
+    profile: profileName,
+    family,
+    workerArgs: family === "claude" ? [...profile.claudeArgs] : null,
+    workerParams: family === "codex" ? { ...profile.codexParams } : null
+  });
+}
 
+function resolveWorkspace(profileName, options) {
   if (Object.hasOwn(options, "sandboxed")) {
     throw new Error("sandboxed booleans are not accepted; provide an executor-produced sandboxAttestation.");
   }
@@ -157,6 +226,67 @@ export function resolveBridgePolicy(options = {}) {
     throw new Error(`Canonical workspace is outside permittedRoot for bridge trust profile "${profileName}".`);
   }
   validateRequestedTools(profileName, options.requestedTools);
+  return { requestedWorkspacePath, canonicalWorkspacePath, canonicalPermittedRoot };
+}
+
+// schemaVersion 2: a family is named, and the profile comes from BRIDGE_PROFILES.
+function resolveFamilyPolicy(options) {
+  const profileName = options.profile;
+  const { family, workerArgs, workerParams } = resolveFamilyProfile(profileName, options.family);
+  const profile = BRIDGE_PROFILES[profileName];
+  const { requestedWorkspacePath, canonicalWorkspacePath, canonicalPermittedRoot } = resolveWorkspace(profileName, options);
+  if (options.permissionMode !== undefined) {
+    if (profileName === "host") {
+      throw new Error(
+        `Bridge profile "host" does not set a permission mode; the host configuration decides (got "${String(options.permissionMode)}").`
+      );
+    }
+    if (family === "codex") {
+      throw new Error(`Bridge profile "${profileName}" takes no permission mode for a codex worker.`);
+    }
+    if (options.permissionMode !== profile.permissionMode) {
+      throw new Error(
+        `Bridge trust profile "${profileName}" requires permissionMode "${profile.permissionMode}", not "${options.permissionMode}".`
+      );
+    }
+  }
+  const sandboxAttestation = validateSandboxAttestation(profileName, options);
+
+  return deepFreeze({
+    profile: profileName,
+    family,
+    permissionMode: family === "claude" ? profile.permissionMode : null,
+    requestedWorkspacePath,
+    canonicalWorkspacePath,
+    workspacePath: canonicalWorkspacePath,
+    permittedRoot: canonicalPermittedRoot,
+    sandboxAttestation,
+    workerArgs,
+    workerParams
+  });
+}
+
+/**
+ * Resolve the trust policy for a delegation.
+ *
+ * Without `family` this is the 1.x resolver, unchanged: BRIDGE_TRUST_PROFILES and
+ * `claudeArgs`. With `family` ("claude" or "codex") it resolves a schemaVersion 2
+ * profile from BRIDGE_PROFILES and returns `workerArgs` or `workerParams` instead.
+ */
+export function resolveBridgePolicy(options = {}) {
+  if (options.family !== undefined) return resolveFamilyPolicy(options);
+  const profileName = options.profile;
+  if (profileName === "host") {
+    throw new Error('Bridge profile "host" exists only for schemaVersion 2 requests; pass the worker family to resolve it.');
+  }
+  const profile = Object.hasOwn(BRIDGE_TRUST_PROFILES, profileName) ? BRIDGE_TRUST_PROFILES[profileName] : undefined;
+  if (!profile) {
+    throw new Error(
+      `Unknown bridge trust profile "${String(profileName)}". Allowed profiles: ${Object.keys(BRIDGE_TRUST_PROFILES).join(", ")}.`
+    );
+  }
+
+  const { requestedWorkspacePath, canonicalWorkspacePath, canonicalPermittedRoot } = resolveWorkspace(profileName, options);
 
   if (options.permissionMode !== undefined && options.permissionMode !== profile.permissionMode) {
     throw new Error(

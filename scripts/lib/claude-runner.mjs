@@ -20,8 +20,14 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const ENV_ALLOWLIST = new Set([
   "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM",
   "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+  "CLAUDE_CONFIG_DIR", "CODEX_HOME",
   "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
 ]);
+
+// The identity names which account home the worker ran under, never the path.
+function accountHomeName(value) {
+  return typeof value === "string" && value.length > 0 ? path.basename(value) : null;
+}
 
 function assertRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("runner request must be an object");
@@ -288,7 +294,11 @@ export async function runClaudeWorker(spec) {
     startedAt,
     requestedPermissionMode: requestedPermissionMode(request),
     effectivePermissionMode: null,
-    permissionVerification: "pending"
+    permissionVerification: "pending",
+    accountHomes: {
+      claudeConfigDir: accountHomeName(childEnvironment.CLAUDE_CONFIG_DIR),
+      codexHome: accountHomeName(childEnvironment.CODEX_HOME)
+    }
   };
   writeJsonAtomic(spec.identityFile, identity);
 

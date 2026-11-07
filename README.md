@@ -118,6 +118,22 @@ acknowledged; `3` means the terminal job failed or did not satisfy verification
 and delivery; `4` means Claude has a pending question that needs a reply. A wait
 timeout is an operational error and exits nonzero with a diagnostic.
 
+Run `wait` from the Codex session that delegated the job (its `CODEX_THREAD_ID`
+equals the job's origin thread) to receive the result there: that `wait` holds
+the job's waiter lease and prints the result, in plain text as well as in
+`--json`, and acknowledges the delivery only after the output was written. Any
+other caller only observes. If the origin was busy and no `wait` was running, the
+result is queued: `status --json` shows `deliveryQueue: "inbox"` and
+`lastError: "origin-busy"`, and the origin's next `wait`, `status` or `delegate`
+prints the queued results and acknowledges them once that output was written. A
+command that times out, fails, is interrupted or cannot write its output (a
+closed pipe) leaves them queued, and a failed write records
+`lastError: "origin-output-failed"` without spending the inbox quota. The receipt
+the delivering command prints still shows `delivery.state: "pending"`, because it
+is read before the write is confirmed; the stored delivery is acknowledged once
+the write succeeded. Workers and the verifier inherit `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` when they are set.
+
 `send` provides live same-session steering only while the authoritative Claude
 worker is still running. The first authoritative result closes that input
 window so verification and delivery can begin. Without `--wait`, exit `0` means
@@ -373,6 +389,36 @@ Deep-review lane defaults:
 
 `/claude-review:setup` now reports whether subscription auth is detected so
 you know up-front whether the budget cap will apply.
+
+## Two-Way Contracts, Host Profile, And Config File
+
+The bridge contracts now have a schemaVersion 2 that describes delegation in
+both directions: Codex to Claude, and Claude to Codex. The verifier is always
+the other family. The command-line flags that use it arrive in a later change;
+until then the commands keep writing the 1.x contracts, and every 1.x job stays
+readable.
+
+- **`host` profile.** For a schemaVersion 2 request, `host` passes no
+  permission, sandbox or approval setting, so the host's own Claude or Codex
+  configuration decides. Read-only access comes only from an explicit
+  `review-readonly`.
+- **Config file.** An optional `~/.config/codex-claude/config.json` (or
+  `$XDG_CONFIG_HOME/codex-claude/config.json`, or the path in
+  `CODEX_CLAUDE_CONFIG`) sets defaults, per-preset profiles and routing by task
+  family. A missing file changes nothing, and an invalid one fails closed.
+- **Extensions.** Local modules listed by absolute path in the config file can
+  route models, check a resolved model, pick an account home, add required
+  verification checks and observe events. An extension is one self-contained
+  module (it may import `node:` modules only; a relative, package or `file:` URL
+  import fails when it loads). Loading fails closed, and each module's sha256 is
+  recorded, so a recovered job reports a changed one. The digest is a recovery
+  signal against drift in good-faith use, not a defence against the extension's
+  author: extensions carry the same trust as the CLI, and a dynamic `import()` or
+  an import specifier written with a string escape is outside what the loader
+  can check.
+
+See [the migration contract](docs/bridge-migration.md) for the profile table,
+the config keys and the extension API.
 
 ## Install
 
@@ -699,6 +745,7 @@ schemas/
   bridge-message-operation.schema.json
   bridge-result.schema.json
   bridge-receipt.schema.json
+  bridge-config.schema.json
   review-output.schema.json
   elite-review-output.schema.json
   agentic-review-output.schema.json

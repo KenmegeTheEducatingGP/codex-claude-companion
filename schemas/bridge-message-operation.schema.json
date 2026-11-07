@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-message-operation.schema.json",
   "title": "Codex-Claude Bridge durable messaging operation",
+  "description": "Versioned durable messaging operation. <family>_message is authored by that family's side; <family>_applied records that the worker applied that family's message. schemaVersion 2 adds claude_applied and lets either family send and acknowledge.",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": { "schemaVersion": { "enum": [1, 2] } },
+  "oneOf": [{ "$ref": "#/$defs/v1" }, { "$ref": "#/$defs/v2" }],
+  "$defs": {
+  "v1": {
+  "title": "Codex-Claude Bridge durable messaging operation",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "jobId", "sequence", "kind", "state", "messageId", "deduplicationKey", "timestamp", "text", "inReplyTo", "continuation"],
@@ -40,4 +48,29 @@
     { "properties": { "kind": { "const": "codex_applied" }, "state": { "const": "applied" }, "text": { "type": "null" }, "inReplyTo": { "type": "null" } } },
     { "properties": { "kind": { "const": "claude_message" }, "state": { "const": "ack" }, "text": { "type": "string", "minLength": 1 }, "inReplyTo": { "type": "string" } } }
   ]
+  },
+    "v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "jobId", "sequence", "kind", "state", "messageId", "deduplicationKey", "timestamp", "text", "inReplyTo", "continuation"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "jobId": { "$ref": "#/$defs/v1/properties/jobId" },
+        "sequence": { "$ref": "#/$defs/v1/properties/sequence" },
+        "kind": { "enum": ["codex_message", "codex_applied", "claude_message", "claude_applied"] },
+        "state": { "$ref": "#/$defs/v1/properties/state" },
+        "messageId": { "$ref": "#/$defs/v1/properties/messageId" },
+        "deduplicationKey": { "$ref": "#/$defs/v1/properties/deduplicationKey" },
+        "timestamp": { "$ref": "#/$defs/v1/properties/timestamp" },
+        "text": { "$ref": "#/$defs/v1/properties/text" },
+        "inReplyTo": { "$ref": "#/$defs/v1/properties/inReplyTo" },
+        "continuation": { "$ref": "#/$defs/v1/properties/continuation" }
+      },
+      "oneOf": [
+        { "properties": { "kind": { "enum": ["codex_message", "claude_message"] }, "state": { "const": "pending" }, "text": { "type": "string", "minLength": 1 }, "continuation": { "type": "null" } } },
+        { "properties": { "kind": { "enum": ["codex_message", "claude_message"] }, "state": { "const": "ack" }, "text": { "type": "string", "minLength": 1 }, "inReplyTo": { "type": "string" } } },
+        { "properties": { "kind": { "enum": ["codex_applied", "claude_applied"] }, "state": { "const": "applied" }, "text": { "type": "null" }, "inReplyTo": { "type": "null" } } }
+      ]
+    }
+  }
 }

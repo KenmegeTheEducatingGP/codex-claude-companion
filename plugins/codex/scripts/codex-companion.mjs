@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified by Kennedy Umege for Codex-Claude Bridge, 2026.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -410,7 +411,6 @@ async function executeReviewRun(request) {
   const result = await runAppServerTurn(context.repoRoot, {
     prompt,
     model: request.model,
-    sandbox: "read-only",
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     signal: request.signal,
     onProgress: request.onProgress
@@ -488,7 +488,9 @@ async function executeTaskRun(request) {
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
+    // --write is the user's explicit request for a writable sandbox. Without
+    // it no sandbox is sent and the host's Codex configuration decides.
+    ...(request.write ? { sandbox: "workspace-write" } : {}),
     signal: request.signal,
     onProgress: request.onProgress,
     persistThread: true,

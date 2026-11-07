@@ -12,9 +12,12 @@ import { redact } from "./redact.mjs";
 // origin-supplied verification command or the read-only Codex reviewer, and that
 // unknown future secrets stay stripped by default. Auth material (Anthropic/OpenAI
 // keys, OAuth tokens) is intentionally excluded: neither surface needs it.
+// CLAUDE_CONFIG_DIR and CODEX_HOME are non-secret paths; they keep the verifier
+// on the delegating session's own account home instead of the default one.
 const VERIFIER_ENV_ALLOWLIST = new Set([
   "PATH", "HOME", "SHELL", "TMPDIR", "USER", "LOGNAME", "TERM", "LANG",
-  "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"
+  "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+  "CLAUDE_CONFIG_DIR", "CODEX_HOME"
 ]);
 // Windows resolves environment variable names case-insensitively (PATH is
 // conventionally `Path`) and nested npm/git need these infrastructure vars, so
