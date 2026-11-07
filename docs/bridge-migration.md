@@ -137,9 +137,11 @@ is now a `oneOf` union on `schemaVersion`:
   - quota events, extension digests (name and sha256 only, never a local path),
     the continuation and repair attempts.
 - In v2, events and message operations can come from either family. The
-  validators check each author against the job's origin and worker families:
-  a `question` comes from the worker, a pending message from the origin, and an
-  acknowledgement from the worker.
+  validators check each author against the job's origin and worker families
+  and keep the roles 1.x fixed: `progress`, `question`, `blocked`, `completed`,
+  `failed` and `cancelled` come from the worker, `cancel_requested` from the
+  origin, a pending message from the origin, and an acknowledgement from the
+  worker. The bridge may also write any of these events except a `question`.
 
 Any other `schemaVersion` is a schema error that names the supported versions.
 

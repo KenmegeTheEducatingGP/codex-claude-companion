@@ -519,6 +519,58 @@ test("v2 events allow either family as author but bind authors to the job's fami
   rejects(validateBridgeEventContract, { ...v1Question, sender: "codex" }, undefined, "v1 questions still come only from Claude");
 });
 
+test("v2 events keep each author's 1.x role: worker-side events from the worker family, a cancel request from the origin", () => {
+  const payloads = {
+    progress: { message: "working" },
+    question: { questionId: "q-1", text: "Approve the command?" },
+    blocked: { reason: "waiting for input" },
+    completed: { resultPath: "/tmp/ccb/result.json" },
+    failed: { error: "tests failed" },
+    cancelled: { reason: "origin cancelled" },
+    cancel_requested: { reason: "origin cancelled", requestedAt: "2026-07-18T12:00:00Z" }
+  };
+  const roleOf = (type) => (type === "cancel_requested" ? "origin" : "worker");
+  // Every type either family may author in v2 has a role here, so a new one cannot arrive unbound.
+  const eitherFamilyTypes = readSchema("event").$defs.v2.oneOf
+    .filter((branch) => ["claude", "codex"].every((family) => branch.properties.sender.enum?.includes(family)))
+    .map((branch) => branch.properties.type.const);
+  assert.deepEqual(eitherFamilyTypes.sort(), Object.keys(payloads).sort());
+  const semantics = (pattern) => (error) =>
+    error instanceof BridgeContractValidationError && error.phase === "semantics" && pattern.test(error.message);
+
+  for (const [originFamily, workerFamily] of [["claude", "codex"], ["codex", "claude"]]) {
+    const job = { originFamily, workerFamily };
+    for (const [type, payload] of Object.entries(payloads)) {
+      const role = roleOf(type);
+      const [author, other] = role === "worker" ? [workerFamily, originFamily] : [originFamily, workerFamily];
+      accepts((value) => validateBridgeEventContract(value, job), v2Event({ type, sender: author, payload }), `${type} from the ${role}, ${author}`);
+      assert.throws(
+        () => validateBridgeEventContract(v2Event({ type, sender: other, payload }), job),
+        semantics(new RegExp(`${type} must come from the ${role} family \\(${author}\\), not ${other}`)),
+        `${type} from ${other}, which is not the job's ${role}`
+      );
+      if (type !== "question") {
+        accepts((value) => validateBridgeEventContract(value, job), v2Event({ type, sender: "bridge", payload }), `${type} from the bridge`);
+      }
+    }
+  }
+  // A job whose origin and worker are the same family: the family holds both roles.
+  for (const [type, payload] of Object.entries(payloads)) {
+    accepts(
+      (value) => validateBridgeEventContract(value, { originFamily: "claude", workerFamily: "claude" }),
+      v2Event({ type, sender: "claude", payload }),
+      `${type} in a Claude-to-Claude job`
+    );
+  }
+  // 1.x fixed the same roles in the schema itself, with Codex always the origin and Claude always the worker.
+  for (const [type, payload] of Object.entries(payloads)) {
+    const [author, other] = roleOf(type) === "worker" ? ["claude", "codex"] : ["codex", "claude"];
+    const v1Event = (sender) => ({ ...v2Event({ type, sender, payload }), schemaVersion: 1 });
+    accepts(validateBridgeEventContract, v1Event(author), `1.x ${type} from ${author}`);
+    rejects(validateBridgeEventContract, v1Event(other), undefined, `1.x ${type} from ${other}`);
+  }
+});
+
 test("v2 message operations add claude_applied and bind authors to the job's families", () => {
   const claudeToCodex = { originFamily: "claude", workerFamily: "codex" };
   for (const operation of [

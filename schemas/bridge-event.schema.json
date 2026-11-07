@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-event.schema.json",
   "title": "Codex-Claude Bridge ordered event",
-  "description": "One entry in a durable at-least-once event stream, versioned by schemaVersion. Consumers deduplicate by deduplicationKey. In schemaVersion 2 either family may author worker-side events; validators also require the author family to be the job's origin or worker family, and a question to come from the worker family.",
+  "description": "One entry in a durable at-least-once event stream, versioned by schemaVersion. Consumers deduplicate by deduplicationKey. In schemaVersion 2 either family may be the job's origin or its worker. Validators require a family author to take part in the job and keep its 1.x role: progress, question, blocked, completed, failed and cancelled come from the worker family, and cancel_requested from the origin family.",
   "type": "object",
   "required": ["schemaVersion"],
   "properties": { "schemaVersion": { "enum": [1, 2] } },

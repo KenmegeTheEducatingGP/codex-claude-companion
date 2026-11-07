@@ -123,9 +123,24 @@ function jobFamilies(kind, context) {
   return { originFamily, workerFamily };
 }
 
+// The side of the job that each family-authored v2 event type speaks for: the role the
+// 1.x schema fixed, where Codex was always the origin and Claude always the worker. A
+// message type names its family instead, so either side may send one.
+const EVENT_AUTHOR_ROLES = Object.freeze({
+  progress: "worker",
+  question: "worker",
+  blocked: "worker",
+  completed: "worker",
+  failed: "worker",
+  cancelled: "worker",
+  cancel_requested: "origin"
+});
+
 /**
- * Validate one bridge event. schemaVersion 2 events also need the job's families,
- * because either family may author worker-side events.
+ * Validate one bridge event. schemaVersion 2 events also need the job's families:
+ * either family may be the origin or the worker, and an event a family authors keeps
+ * its 1.x role, so worker-side events come from the worker family and a cancel
+ * request from the origin family.
  *
  * @param {object} event
  * @param {{originFamily: "claude"|"codex", workerFamily: "claude"|"codex"}} [context] required for schemaVersion 2
@@ -142,8 +157,11 @@ export function validateBridgeEventContract(event, context) {
       `Bridge event ${type} sender ${sender} is neither the job's origin family (${originFamily}) nor its worker family (${workerFamily}).`
     );
   }
-  if (type === "question" && sender !== workerFamily) {
-    throw semanticsError(`Bridge event question must come from the worker family (${workerFamily}), not ${sender}.`);
+  const role = Object.hasOwn(EVENT_AUTHOR_ROLES, type) ? EVENT_AUTHOR_ROLES[type] : undefined;
+  if (role === undefined) return event;
+  const expected = role === "worker" ? workerFamily : originFamily;
+  if (sender !== expected) {
+    throw semanticsError(`Bridge event ${type} must come from the ${role} family (${expected}), not ${sender}.`);
   }
   return event;
 }

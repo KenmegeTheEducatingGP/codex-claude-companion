@@ -22,6 +22,10 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   routing resolver reports), and receipts with the effective worker and verifier
   settings, the delivery route, the `queued` state and a verifier integrity
   record. A request or a receipt that continues its own job is refused.
+  Either family may author a v2 event in the role 1.x gave it: progress,
+  questions, blocked, completed, failed and cancelled come from the job's
+  worker family and a cancel request from its origin family, so an event
+  written by the wrong side of the job is refused.
 - `scripts/lib/bridge-compat.mjs` reads every supported contract version into
   one internal layout, so 1.x jobs stay readable and finish under 1.x
   semantics.
