@@ -4,6 +4,7 @@
 // operations, the real broker loop and runtime, and the real CLI run here; only
 // the origin adapter is a fake that throws the error a live origin returns.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -31,11 +32,18 @@ import {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-function createVerifiedJob(prefix, jobId, threadId) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function createRoot(prefix) {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   const workspace = path.join(base, "workspace");
   const stateRoot = path.join(base, "state");
   fs.mkdirSync(workspace);
+  return { base, workspace, stateRoot };
+}
+
+// `root` lets several jobs of one thread share a state root and a workspace;
+// `complete: false` leaves the job running, with no result yet.
+function createVerifiedJob(prefix, jobId, threadId, { root = createRoot(prefix), complete = true } = {}) {
+  const { workspace, stateRoot } = root;
   const origin = {
     codexThreadId: threadId, codexTurnId: `${threadId}-turn`,
     cwd: workspace, repoRoot: workspace, branch: null, head: null
@@ -62,16 +70,19 @@ function createVerifiedJob(prefix, jobId, threadId) {
   const brokerAuthority = getBridgeBrokerAuthority(jobId, { stateRoot });
   const brokerOptions = { stateRoot, brokerAuthority };
   transitionBridgeJob(jobId, "running", {}, brokerOptions);
-  transitionBridgeJob(jobId, "completed", {}, brokerOptions);
-  const result = {
-    schemaVersion: 1, jobId, status: "completed", summary: "Implemented and verified the change.",
-    filesChanged: [], commandsRun: [], testsRun: [], findings: [], blockers: [],
-    claudeSessionId, exitStatus: { code: 0, signal: null }, artifactPaths: []
-  };
-  writeBridgeResult(jobId, result, brokerOptions);
-  recordVerification(jobId, {
-    state: "passed", verifiedAt: new Date(Date.now() + 1_000).toISOString(), evidence: ["independent:passed"]
-  }, brokerOptions);
+  let result = null;
+  if (complete) {
+    transitionBridgeJob(jobId, "completed", {}, brokerOptions);
+    result = {
+      schemaVersion: 1, jobId, status: "completed", summary: "Implemented and verified the change.",
+      filesChanged: [], commandsRun: [], testsRun: [], findings: [], blockers: [],
+      claudeSessionId, exitStatus: { code: 0, signal: null }, artifactPaths: []
+    };
+    writeBridgeResult(jobId, result, brokerOptions);
+    recordVerification(jobId, {
+      state: "passed", verifiedAt: new Date(Date.now() + 1_000).toISOString(), evidence: ["independent:passed"]
+    }, brokerOptions);
+  }
   const jobDir = resolveBridgeJobDir(jobId, { stateRoot });
   const brokerSpec = {
     schemaVersion: 1, jobId, stateRoot, jobDir, prompt: "live origin delivery fixture",
@@ -272,4 +283,171 @@ test("the shipped origin adapter's active-writer protocol error is classified or
   assert.equal(queued.state, "inbox");
   assert.equal(queued.lastError, "origin-busy");
   assert.equal(queued.attempts, 1);
+});
+
+// A queued result is claimed when a command is about to print it, never when
+// the command starts. A command that ends first (timeout, error, signal)
+// therefore leaves it queued for the next origin command.
+const CLI_URL = new URL("../scripts/lib/bridge-cli.mjs", import.meta.url).href;
+
+// One thread, one workspace: a job that finished and was queued while the
+// origin was busy, and a second job still running.
+async function threadWithQueuedResult(prefix, thread) {
+  const root = createRoot(prefix);
+  const done = createVerifiedJob(prefix, "ccb_00000000000000000000D2E001", thread, { root });
+  const running = createVerifiedJob(prefix, "ccb_00000000000000000000D2E002", thread, { root, complete: false });
+  const queued = await deliverBridgeResult({
+    result: done.result,
+    receipt: readReceipt(done.jobId, done.brokerOptions),
+    origin: done.origin,
+    stateOperations: done.coordination,
+    originAdapter: busyOrigin(thread).adapter
+  });
+  assert.equal(queued.state, "queued");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox");
+  return { root, done, running };
+}
+
+async function assertNextOriginCommandDelivers(cli, { root, done, running }, thread) {
+  const next = await cli.run("status", [running.jobId, "--json", "--state-dir", root.stateRoot], { codexThreadId: thread });
+  assert.equal(next.error, null, next.error?.message);
+  assert.deepEqual(JSON.parse(next.text).queuedResults.map((entry) => entry.jobId), [done.jobId],
+    "the next origin command must still find the result queued and print it");
+  const delivered = readDelivery(done.jobId, done.brokerOptions);
+  assert.equal(delivered.state, "acknowledged");
+  assert.equal(delivered.route, "waiter");
+}
+
+test("an origin wait that times out leaves another job's queued result queued (D2, A13)", async () => {
+  const thread = "thread-live-origin-e";
+  const fixture = await threadWithQueuedResult("ccb-live-origin-timeout-", thread);
+  const { root, done, running } = fixture;
+  const cli = cliHarness();
+
+  const waited = await cli.run("wait", [running.jobId, "--json", "--state-dir", root.stateRoot, "--timeout", "1"], {
+    codexThreadId: thread
+  });
+  assert.match(waited.error?.message ?? "", /Timed out waiting for bridge job/);
+  assert.equal(waited.text, "", "a wait that times out prints nothing");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
+    "the timed-out wait printed no result, so the queued one must stay queued");
+  assert.equal(cli.brokerStarts(), 1, "only the waited job gets a broker; a queued result restarts none");
+
+  await assertNextOriginCommandDelivers(cli, fixture, thread);
+});
+
+const WAIT_CHILD = `
+import { handleBridgeCommand } from ${JSON.stringify(CLI_URL)};
+const [stateRoot, jobId, thread] = process.argv.slice(1);
+process.exitCode = await handleBridgeCommand("wait", [jobId, "--json", "--state-dir", stateRoot, "--timeout", "600"], {
+  codexThreadId: thread, processAlive: () => false, discoverBrokerPid: () => null, spawnDetached: () => 4242
+});
+`;
+
+test("an origin wait that is interrupted leaves another job's queued result queued (D2, A13)", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("a signal is an abrupt kill on Windows; the timeout test covers the same ground there");
+    return;
+  }
+  const thread = "thread-live-origin-f";
+  const fixture = await threadWithQueuedResult("ccb-live-origin-signal-", thread);
+  const { root, done, running } = fixture;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", WAIT_CHILD, root.stateRoot, running.jobId, thread], {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  let ended = null;
+  child.once("exit", (code, signal) => { ended = { code, signal }; });
+
+  // The wait is blocking once it holds the job's waiter lease.
+  const deadline = Date.now() + 15_000;
+  while (running.coordination.readWaiterLease(running.jobId)?.live !== true) {
+    if (ended !== null || Date.now() > deadline) {
+      child.kill("SIGKILL");
+      assert.fail(`the wait never reached its blocking loop (exit ${JSON.stringify(ended)}): ${output}`);
+    }
+    await delay(20);
+  }
+  child.kill("SIGINT");
+  while (ended === null) await delay(20);
+
+  assert.equal(ended.signal, "SIGINT", `the wait was not interrupted by the signal: ${JSON.stringify(ended)} ${output}`);
+  assert.equal(output, "", "an interrupted wait prints nothing");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
+    "the interrupted wait printed no result, so the queued one must stay queued");
+
+  await assertNextOriginCommandDelivers(cliHarness(), fixture, thread);
+});
+
+test("a delegate that fails after the queue was found leaves the queued result queued (D2, A13)", async () => {
+  const thread = "thread-live-origin-g";
+  const fixture = await threadWithQueuedResult("ccb-live-origin-delegate-", thread);
+  const { root, done } = fixture;
+  const cli = cliHarness();
+
+  // The running job holds the workspace, so creating the new job fails.
+  const delegated = await cli.run("delegate", [
+    "--prompt", "second task", "--verify-command", JSON.stringify([process.execPath, "-e", "0"]),
+    "--path", root.workspace, "--thread-id", thread, "--state-dir", root.stateRoot,
+    "--tmux", process.execPath, "--claude", process.execPath, "--codex", process.execPath, "--json"
+  ]);
+  assert.match(delegated.error?.message ?? "", /Workspace already leased by/);
+  assert.equal(delegated.text, "", "a delegate that fails prints nothing");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
+    "the failed delegate printed no result, so the queued one must stay queued");
+
+  await assertNextOriginCommandDelivers(cli, fixture, thread);
+});
+
+const countOf = (text, needle) => text.split(needle).length - 1;
+
+test("the origin's plain-text wait prints the result it delivers as the waiter (D2, A13)", async () => {
+  const job = createVerifiedJob("ccb-live-origin-plain-", "ccb_00000000000000000000D2F001", "thread-live-origin-h");
+  const origin = busyOrigin(job.threadId);
+  const cli = cliHarness();
+
+  const waiting = cli.run("wait", [job.jobId, "--state-dir", job.stateRoot, "--timeout", "5"], {
+    codexThreadId: job.threadId
+  });
+  await delay(100);
+  const broker = await runBrokerOnce(job, origin.adapter, { maxSleeps: 300, sleepMs: 10 });
+  const waited = await waiting;
+
+  assert.equal(origin.calls(), 0, "the broker must hand delivery to the live waiter");
+  assert.equal(waited.error, null, `origin wait: ${waited.error?.message}`);
+  assert.equal(waited.exitCode, 0);
+  assert.equal(broker.error, null, broker.error?.message);
+  assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "acknowledged");
+  assert.equal(countOf(waited.text, "Implemented and verified the change."), 1,
+    `the wait that delivers the result must print it (once); its plain-text output was:\n${waited.text}`);
+  assert.match(waited.text, /Worker completed: yes/);
+  assert.match(waited.text, /Independently verified: yes/);
+});
+
+test("the origin's wait for a queued job reports its result once, in plain text and in --json (D2, A13)", async () => {
+  const thread = "thread-live-origin-i";
+  const results = {};
+  for (const [mode, jobId] of [["plain", "ccb_00000000000000000000D2F002"], ["json", "ccb_00000000000000000000D2F003"]]) {
+    const job = createVerifiedJob(`ccb-live-origin-once-${mode}-`, jobId, thread);
+    await deliverBridgeResult({
+      result: job.result,
+      receipt: readReceipt(job.jobId, job.brokerOptions),
+      origin: job.origin,
+      stateOperations: job.coordination,
+      originAdapter: busyOrigin(thread).adapter
+    });
+    assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "inbox");
+    const argv = [job.jobId, "--state-dir", job.stateRoot, "--timeout", "2", ...(mode === "json" ? ["--json"] : [])];
+    results[mode] = await cliHarness().run("wait", argv, { codexThreadId: thread });
+    assert.equal(results[mode].error, null, results[mode].error?.message);
+    assert.equal(results[mode].exitCode, 0);
+    assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "acknowledged");
+  }
+  assert.equal(countOf(results.plain.text, "Implemented and verified the change."), 1, results.plain.text);
+  const payload = JSON.parse(results.json.text);
+  assert.equal(payload.result.summary, "Implemented and verified the change.");
+  assert.equal(payload.queuedResults, undefined,
+    "the payload already carries this job's result, so queuedResults must not repeat it");
 });
