@@ -13,6 +13,32 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   function summary for the shipped source; CI publishes it on the Linux Node 22
   job. The reporter is development-only and not part of the npm package.
 
+### Fixed
+
+- Bridge delivery no longer rewrites the origin Codex thread's permissions. The
+  bundled Codex client sent `sandbox: "read-only"` and `approvalPolicy: "never"`
+  on every thread start and resume, and the app-server keeps such overrides in
+  the thread, so each delivery downgraded the origin for good. Both keys are now
+  sent only when the caller chose a value, and the user's Codex configuration
+  decides otherwise. The bundled plugin's native review, adversarial review and
+  `task` without `--write` no longer force read-only; `--write` still requests
+  `workspace-write`.
+- Delivery to a live origin. While the origin session runs `codex-claude wait`,
+  its thread has an active writer and a resume from the broker fails. The
+  origin's own `wait` now holds a waiter lease and receives the result itself,
+  exiting `0` for verified work. With a busy origin and no waiter, the result is
+  queued as `origin-busy` without spending the 64-attempt inbox quota, the
+  broker exits instead of retrying, and the origin's next `wait`, `status` or
+  `delegate` prints and acknowledges it. `status --json` shows `deliveryQueue`
+  and `lastError`; the v1 receipt keeps `delivery.state: "pending"` while a
+  result is queued.
+- Workers and the independent verifier now receive `CLAUDE_CONFIG_DIR` and
+  `CODEX_HOME` when they are set, so they run under the caller's Claude and Codex
+  homes instead of the defaults. The runner identity records only the home
+  directory names.
+- The broker refuses a broker spec whose `schemaVersion` it does not support,
+  with an error that names the supported versions, instead of running it.
+
 ## [1.2.0] — 2026-10-18
 
 ### Changed

@@ -122,6 +122,40 @@ jobs and lists at most 64 terminal jobs older than 30 days. `--older-than-days`
 and `--limit` may lower or tune those documented bounds; only explicit `--apply`
 removes the listed job directories. Active and recent jobs are never candidates.
 
+## Result delivery to the origin
+
+The bridge returns a terminal result to its Codex origin through these routes, in
+order:
+
+1. **Waiter.** A `wait` run from the origin (its `CODEX_THREAD_ID` equals the
+   job's origin thread) holds `jobs/<id>/waiter.lease`, refreshed while it waits.
+   While that lease is live, the broker claims the delivery with
+   `route: "waiter"` and never resumes the origin thread; the waiter
+   acknowledges the claim as it prints the result. A `wait` from any other
+   thread is an observer: it prints and never acknowledges.
+2. **Origin resume.** With no live waiter, the broker resumes the origin thread
+   through the Codex app-server with no sandbox or approval override, so the
+   delivery turn runs under the user's Codex configuration and leaves the
+   thread's permissions unchanged.
+3. **Inbox.** A failed resume queues the result in the durable inbox. A resume
+   that fails because the origin thread already has an active writer is
+   recorded as `origin-busy`: it spends none of the 64-attempt inbox quota, and
+   the broker exits instead of retrying a thread that is in use. Other failures
+   still count against the quota. The origin's next `wait`, `status` or
+   `delegate` prints its thread's queued results (a "queued results" block, or
+   `queuedResults` with `--json`) and acknowledges them before the automatic
+   recovery sweep, so a result delivered this way restarts no broker.
+
+The v1 receipt keeps `delivery.state: "pending"` while a result is queued; its
+schema is unchanged. `status --json` exposes the queue from the durable delivery
+file as `deliveryQueue: "inbox"` and `lastError`, for example `"origin-busy"`.
+
+Workers, the runner and the independent verifier inherit `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` when they are set, so they run under the caller's Claude and Codex
+homes; other variables stay stripped. The runner identity records only the home
+directory names. The broker runs only broker specs whose `schemaVersion` this
+release supports and refuses any other with an error.
+
 ## Durable state contracts
 
 - `schemas/bridge-delegation-request.schema.json` records immutable origin, worker, execution, policy, and task acceptance data.
