@@ -223,8 +223,12 @@ worker family is the rule's own, else the request's, else `defaults.workerFamily
 
 An extension is a local module named by absolute path in `extensions`. Its
 default export is `{ apiVersion: 1, name, ...hooks }`. It is one self-contained
-ES module: it may import `node:` modules and nothing else, so one file holds all
-the code it runs (`import.meta.url` is not a file location):
+ES module: it imports `node:` modules and nothing else, so one file holds all the
+code it runs (`import.meta.url` is not a file location). The loader refuses a
+relative or package import when the extension loads. An import by absolute
+`file:` URL, a dynamic `import()` and any other way of reading and running other
+files are outside what the module system can refuse, and the digest does not
+cover them:
 
 | Hook | Called with | Returns | On failure |
 |---|---|---|---|
@@ -235,10 +239,10 @@ the code it runs (`import.meta.url` is not a file location):
 | `observe` | `event` | nothing | Reported and ignored; never fatal |
 
 Loading fails closed with `extension-load-failed` for a relative or missing
-path, a failed import, an import of another file or package, a wrong
-`apiVersion`, a missing name, an unknown key or a duplicate name. The loader
-imports exactly the bytes it hashes and records that sha256, which therefore
-covers everything the extension runs. A receipt keeps each extension's name and
+path, a failed import, a relative or package import (the message names it), a
+wrong `apiVersion`, a missing name, an unknown key or a duplicate name. The
+loader imports exactly the bytes it hashes and records that sha256, which
+therefore covers the module that runs. A receipt keeps each extension's name and
 sha256; the broker keeps the path as well (`recordBridgeExtensions`). A recovered
 job imports the file again and reports any digest change, so changed code never
 runs unnoticed. Extensions carry the same trust as the command-line tool itself.

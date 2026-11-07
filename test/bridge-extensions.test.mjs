@@ -91,7 +91,7 @@ test("a recovered job re-imports its extensions and reports a changed digest", a
 
 // The digest is the recovery integrity signal, so it must cover all the code an
 // extension runs. An extension is therefore one self-contained module: the loader
-// executes exactly the bytes it hashed, and an import of another file fails closed
+// executes exactly the bytes it hashed, and a relative or package import fails closed
 // at load instead of leaving a helper outside the digest.
 test("an extension is one self-contained module, so its digest covers all the code it runs", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-split-"));

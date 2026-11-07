@@ -6,13 +6,17 @@
 // unknown key stops the delegation before anything is launched.
 //
 // An extension is ONE self-contained module. Its sha256 is the integrity signal a
-// recovered job compares, so it must cover all the code the extension runs: the
-// loader imports exactly the bytes it hashed, a module made of those bytes has no
-// location to resolve another file against, and an import of anything but a node:
-// module fails closed at load.
+// recovered job compares, so it must cover the code the extension runs. The loader
+// imports exactly the bytes it hashed, as a module that has no location of its own:
+// a relative or package import fails when the extension loads, and only node:
+// modules can be imported by name. What the module system cannot refuse stays
+// outside the digest: an import by absolute file: URL, a dynamic import() and any
+// other way an extension reads and runs other files. An extension that does that
+// owns the drift.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { isBuiltin } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -65,16 +69,35 @@ function validateDefinition(file, definition) {
   }
 }
 
-// The message for a failed import. Node's own text for a refused local import quotes the whole
-// encoded module, so it is replaced by one that names the import and the rule.
-function importFailure(file, cause) {
+// The specifiers of an extension's static imports and re-exports, in source order. It only helps
+// word a message: the refusal itself comes from the module system. It reads statement starts, so a
+// commented-out import is skipped, and a dynamic import() is not listed.
+const STATIC_IMPORT = /(?:^|[;{}\n])[ \t]*(?:import|export)\b(?:[^"'`;]*?\bfrom\b)?[ \t\r\n]*(["'])([^"'\r\n]+)\1/g;
+
+function staticImportSpecifiers(source) {
+  return [...source.toString("utf8").matchAll(STATIC_IMPORT)].map((match) => match[2]);
+}
+
+/**
+ * The message for a failed import. Node refuses a local or package import from the module the
+ * loader builds, and words it by version: 20 and later name the specifier and quote the whole
+ * encoded module (ERR_UNSUPPORTED_RESOLVE_REQUEST), 18 says only "Invalid URL" (ERR_INVALID_URL).
+ * A refused import is worded from Node's text when that names the specifier and from the
+ * extension's own source when it does not, so the message names the import and the rule on every
+ * supported Node. Exported for the tests.
+ */
+export function describeExtensionImportFailure(file, source, cause) {
   const message = cause?.message ?? String(cause);
-  if (cause?.code === "ERR_UNSUPPORTED_RESOLVE_REQUEST") {
-    const specifier = /Failed to resolve module specifier "([^"]+)"/.exec(message)?.[1];
-    return `Extension ${file} imports ${specifier === undefined ? "another file or package" : JSON.stringify(specifier)}; ` +
-      "an extension must be one self-contained module (import only node: modules), so its digest covers all the code it runs.";
+  const refused = cause?.code === "ERR_UNSUPPORTED_RESOLVE_REQUEST" || cause?.code === "ERR_INVALID_URL";
+  if (!refused) return `Extension ${file} failed to import: ${message}`;
+  const specifier = /Failed to resolve module specifier "([^"]+)"/.exec(message)?.[1] ??
+    staticImportSpecifiers(source).find((candidate) => !isBuiltin(candidate));
+  if (specifier === undefined) {
+    const shown = message.replace(/data:[^"'\s]+/g, "<module>").slice(0, 200);
+    return `Extension ${file} failed to import: ${shown} (an extension must be one self-contained module; only node: modules may be imported)`;
   }
-  return `Extension ${file} failed to import: ${message}`;
+  return `Extension ${file} imports ${JSON.stringify(specifier)}; ` +
+    "an extension must be one self-contained module (import only node: modules), so its digest covers all the code it runs.";
 }
 
 async function loadOne(file) {
@@ -96,7 +119,7 @@ async function loadOne(file) {
     const code = Buffer.concat([source, Buffer.from(`\n//# sourceURL=${pathToFileURL(file).href}\n`)]);
     module = await import(`data:text/javascript;base64,${code.toString("base64")}`);
   } catch (cause) {
-    throw loadFailed(importFailure(file, cause), cause);
+    throw loadFailed(describeExtensionImportFailure(file, source, cause), cause);
   }
   const definition = module.default;
   validateDefinition(file, definition);

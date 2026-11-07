@@ -32,9 +32,11 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   per-preset profiles and routing by task family. Extension API v1 loads local
   modules from absolute paths (POSIX, Windows drive or UNC), records their
   sha256 and fails closed. An extension is one self-contained module: the loader
-  runs exactly the bytes it hashes and refuses an import of any other file or
-  package, so the digest a recovered job compares covers everything the
-  extension runs.
+  runs exactly the bytes it hashes and refuses a relative or package import when
+  it loads, with a message that names the import on every supported Node, so the
+  digest a recovered job compares covers the module that runs. An import by
+  absolute `file:` URL or a dynamic `import()` is outside what the loader can
+  refuse.
 - A v2 result requires the worker's native session once the job completed (a
   UUID for Claude), and a v2 receipt requires the effective settings once the
   worker completed or the verification finished. The extension digests a
