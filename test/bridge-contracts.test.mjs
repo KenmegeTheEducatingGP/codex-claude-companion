@@ -32,6 +32,13 @@ function readSchema(name) {
   return JSON.parse(fs.readFileSync(path.join(ROOT, "schemas", SCHEMA_FILES[name]), "utf8"));
 }
 
+// Each contract file is a oneOf union on schemaVersion; the 1.2.0 contract is its
+// unchanged v1 branch, whose $ref targets stay in the root $defs.
+function readV1Branch(name) {
+  const root = readSchema(name);
+  return { ...root.$defs.v1, $defs: root.$defs };
+}
+
 const JOB_ID = "ccb_01J00000000000000000000000";
 const CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -97,8 +104,8 @@ function compileSchemas() {
 
 test("bridge schemas are strict versioned object contracts", () => {
   for (const name of Object.keys(SCHEMA_FILES)) {
-    const schema = readSchema(name);
-    assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+    assert.equal(readSchema(name).$schema, "https://json-schema.org/draft/2020-12/schema");
+    const schema = readV1Branch(name);
     assert.equal(schema.type, "object");
     assert.equal(schema.additionalProperties, false);
     assert.ok(schema.required.includes("schemaVersion"));
@@ -107,14 +114,14 @@ test("bridge schemas are strict versioned object contracts", () => {
 });
 
 test("result contract defines filesChanged as worker mutations, not review scope", () => {
-  const description = readSchema("result").properties.filesChanged.description;
+  const description = readV1Branch("result").properties.filesChanged.description;
   assert.match(description, /contents, type, or existence this worker actually changed during this job/);
   assert.match(description, /Excludes files only reviewed or inspected/);
   assert.match(description, /read-only and no-edit jobs report an empty array/);
 });
 
 test("delegation request schema captures immutable origin, worker, execution, and task contracts", () => {
-  const schema = readSchema("request");
+  const schema = readV1Branch("request");
   assert.deepEqual(schema.required, ["schemaVersion", "jobId", "origin", "worker", "execution", "task"]);
   assert.deepEqual(schema.$defs.jobId.pattern, "^ccb_[0-9A-HJKMNP-TV-Z]{26}$");
   assert.deepEqual(schema.properties.origin.required, [
@@ -134,7 +141,7 @@ test("delegation request schema captures immutable origin, worker, execution, an
 });
 
 test("event schema defines ordered, deduplicated bridge messages", () => {
-  const schema = readSchema("event");
+  const schema = readV1Branch("event");
   assert.deepEqual(schema.required, [
     "schemaVersion", "jobId", "sequence", "timestamp", "type", "sender", "deduplicationKey", "payload"
   ]);
@@ -147,7 +154,7 @@ test("event schema defines ordered, deduplicated bridge messages", () => {
 });
 
 test("message-operation schema makes bidirectional delivery durable and correlated", () => {
-  const schema = readSchema("messageOperation");
+  const schema = readV1Branch("messageOperation");
   assert.deepEqual(schema.required, [
     "schemaVersion", "jobId", "sequence", "kind", "state", "messageId", "deduplicationKey",
     "timestamp", "text", "inReplyTo", "continuation"
@@ -162,14 +169,14 @@ test("message-operation schema makes bidirectional delivery durable and correlat
 });
 
 test("result and receipt schemas separate completion from delivery acknowledgement and verification", () => {
-  const result = readSchema("result");
+  const result = readV1Branch("result");
   assert.deepEqual(result.required, [
     "schemaVersion", "jobId", "status", "summary", "filesChanged", "commandsRun", "testsRun",
     "findings", "blockers", "claudeSessionId", "exitStatus", "artifactPaths"
   ]);
   assert.deepEqual(result.properties.status.enum, ["completed", "failed", "cancelled"]);
 
-  const receipt = readSchema("receipt");
+  const receipt = readV1Branch("receipt");
   assert.deepEqual(receipt.required, [
     "schemaVersion", "jobId", "createdAt", "workerState", "workerError", "delivery", "verification", "profile", "effectiveClaudePermissionArgs"
   ]);

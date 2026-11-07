@@ -1,0 +1,165 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  BRIDGE_EXTENSION_API_VERSION,
+  BRIDGE_EXTENSION_HOOKS,
+  BridgeExtensionError,
+  checkResolvedModel,
+  collectExtensionGates,
+  describeBridgeExtensions,
+  loadBridgeExtensions,
+  notifyExtensionObservers,
+  reloadBridgeExtensions,
+  selectExtensionAccount
+} from "../scripts/lib/bridge-extensions.mjs";
+
+function writeExtension(source, name = "extension.mjs") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-"));
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, source);
+  return file;
+}
+
+function sha256File(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+function loadFailure(detail) {
+  return (error) => error instanceof BridgeExtensionError && error.reason === "extension-load-failed" &&
+    (detail === undefined || detail.test(error.message));
+}
+
+test("extension API v1 names exactly five hooks", () => {
+  assert.equal(BRIDGE_EXTENSION_API_VERSION, 1);
+  assert.deepEqual(BRIDGE_EXTENSION_HOOKS, ["resolveRouting", "validateResolvedModel", "selectAccount", "gates", "observe"]);
+  assert.ok(Object.isFrozen(BRIDGE_EXTENSION_HOOKS));
+});
+
+test("an extension loads from an absolute path with its sha256 recorded", async () => {
+  const file = writeExtension(`export default { apiVersion: 1, name: "example", observe() {} };`);
+  const [extension, ...rest] = await loadBridgeExtensions([file]);
+  assert.equal(rest.length, 0);
+  assert.equal(extension.name, "example");
+  assert.equal(extension.path, file);
+  assert.equal(extension.sha256, sha256File(file));
+  assert.equal(typeof extension.hooks.observe, "function");
+  assert.ok(Object.isFrozen(extension) && Object.isFrozen(extension.hooks));
+  assert.deepEqual(describeBridgeExtensions([extension]), [{ name: "example", path: file, sha256: sha256File(file) }]);
+  assert.deepEqual(await loadBridgeExtensions([]), []);
+});
+
+test("extension loading fails closed with extension-load-failed", async () => {
+  const cases = [
+    ["relative path", "relative/extension.mjs", /absolute/],
+    ["missing file", path.join(os.tmpdir(), "definitely-missing-bridge-extension.mjs"), /missing|ENOENT|no such file/i],
+    ["import throws", writeExtension(`throw new Error("boom at import");`), /boom at import/],
+    ["syntax error", writeExtension(`export default {`), undefined],
+    ["no default export", writeExtension(`export const name = "x";`), /default export/],
+    ["wrong apiVersion", writeExtension(`export default { apiVersion: 2, name: "future" };`), /apiVersion/],
+    ["missing name", writeExtension(`export default { apiVersion: 1 };`), /name/],
+    ["hook is not a function", writeExtension(`export default { apiVersion: 1, name: "x", gates: [] };`), /gates/],
+    ["unknown hook (typo)", writeExtension(`export default { apiVersion: 1, name: "x", gate() { return []; } };`), /gate/]
+  ];
+  for (const [label, file, detail] of cases) {
+    await assert.rejects(loadBridgeExtensions([file]), loadFailure(detail), label);
+  }
+  const one = writeExtension(`export default { apiVersion: 1, name: "same" };`, "a.mjs");
+  const two = writeExtension(`export default { apiVersion: 1, name: "same" };`, "b.mjs");
+  await assert.rejects(loadBridgeExtensions([one, two]), loadFailure(/duplicate/i));
+  await assert.rejects(loadBridgeExtensions("not-an-array"), loadFailure());
+});
+
+test("a recovered job re-imports its extensions and reports a changed digest", async () => {
+  const file = writeExtension(`export default { apiVersion: 1, name: "drift" };`);
+  const recorded = describeBridgeExtensions(await loadBridgeExtensions([file]));
+  const unchanged = await reloadBridgeExtensions(recorded);
+  assert.deepEqual(unchanged.changed, []);
+  fs.writeFileSync(file, `export default { apiVersion: 1, name: "drift", observe() {} };`);
+  const reloaded = await reloadBridgeExtensions(recorded);
+  assert.equal(typeof reloaded.extensions[0].hooks.observe, "function", "the new content is imported, not a cached module");
+  assert.deepEqual(reloaded.changed, [{ name: "drift", path: file, recordedSha256: recorded[0].sha256, currentSha256: sha256File(file) }]);
+});
+
+test("selectAccount accepts only CLAUDE_CONFIG_DIR and CODEX_HOME as absolute paths", async () => {
+  const good = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "accounts",
+    selectAccount({ family }) { return family === "claude" ? { env: { CLAUDE_CONFIG_DIR: "/accounts/two" }, label: "two" } : null; } };`)]);
+  assert.deepEqual(await selectExtensionAccount(good, { family: "claude", request: null, rateLimit: null }), { env: { CLAUDE_CONFIG_DIR: "/accounts/two" }, label: "two", extension: "accounts" });
+  assert.equal(await selectExtensionAccount(good, { family: "codex", request: null, rateLimit: null }), null);
+  assert.equal(await selectExtensionAccount([], { family: "claude", request: null, rateLimit: null }), null);
+
+  for (const answer of [
+    `{ env: { PATH: "/usr/bin" }, label: "x" }`,
+    `{ env: { CLAUDE_CONFIG_DIR: "/a", ANTHROPIC_API_KEY: "secret" }, label: "x" }`,
+    `{ env: { CODEX_HOME: "relative/home" }, label: "x" }`,
+    `{ env: {}, label: "x" }`,
+    `{ env: { CODEX_HOME: "/a" } }`,
+    `"not an object"`
+  ]) {
+    const extensions = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "bad", selectAccount() { return ${answer}; } };`)]);
+    await assert.rejects(
+      selectExtensionAccount(extensions, { family: "claude", request: null, rateLimit: null }),
+      (error) => error instanceof BridgeExtensionError && error.reason === "extension-account-invalid" && !/secret/.test(error.message),
+      answer
+    );
+  }
+});
+
+test("validateResolvedModel fails closed on a refusal or a throw", async () => {
+  const allow = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "allow", validateResolvedModel() { return { ok: true }; } };`)]);
+  assert.deepEqual(await checkResolvedModel(allow, { family: "claude", model: "m", phase: "launch" }), { ok: true });
+  assert.deepEqual(await checkResolvedModel([], { family: "claude", model: "m", phase: "launch" }), { ok: true });
+  const deny = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "deny", validateResolvedModel({ model }) { return { ok: false, reason: "model-not-allowed: " + model }; } };`)]);
+  assert.deepEqual(await checkResolvedModel([...allow, ...deny], { family: "codex", model: "m2", phase: "routing" }), { ok: false, reason: "model-not-allowed: m2", extension: "deny" });
+  const thrower = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "thrower", validateResolvedModel() { throw new Error("allowlist unreadable"); } };`)]);
+  const thrown = await checkResolvedModel(thrower, { family: "claude", model: "m", phase: "launch" });
+  assert.equal(thrown.ok, false);
+  assert.equal(thrown.extension, "thrower");
+  assert.match(thrown.reason, /allowlist unreadable/);
+  const malformed = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "malformed", validateResolvedModel() { return "yes"; } };`)]);
+  assert.equal((await checkResolvedModel(malformed, { family: "claude", model: "m", phase: "launch" })).ok, false);
+});
+
+test("gates are validated required checks and an invalid gate fails verification setup", async () => {
+  const extensions = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "gatekeeper",
+    gates({ workspace }) { return [{ name: "lint", argv: ["npm", "run", "lint"], cwd: workspace, timeoutSeconds: 120 }]; } };`)]);
+  assert.deepEqual(
+    await collectExtensionGates(extensions, { request: null, result: null, workspace: "/repo" }),
+    [{ name: "lint", argv: ["npm", "run", "lint"], cwd: "/repo", timeoutSeconds: 120, extension: "gatekeeper" }]
+  );
+  assert.deepEqual(await collectExtensionGates([], { request: null, result: null, workspace: "/repo" }), []);
+  for (const gate of [
+    `{ name: "x", argv: [], cwd: "/repo", timeoutSeconds: 1 }`,
+    `{ name: "x", argv: "npm test", cwd: "/repo", timeoutSeconds: 1 }`,
+    `{ name: "x", argv: ["npm"], cwd: "relative", timeoutSeconds: 1 }`,
+    `{ name: "x", argv: ["npm"], cwd: "/repo", timeoutSeconds: 0 }`,
+    `{ name: "", argv: ["npm"], cwd: "/repo", timeoutSeconds: 1 }`,
+    `{ name: "x", argv: ["npm"], cwd: "/repo", timeoutSeconds: 1, shell: true }`
+  ]) {
+    const bad = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "bad", gates() { return [${gate}]; } };`)]);
+    await assert.rejects(
+      collectExtensionGates(bad, { request: null, result: null, workspace: "/repo" }),
+      (error) => error instanceof BridgeExtensionError && error.reason === "extension-gate-invalid",
+      gate
+    );
+  }
+  const thrower = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "t", gates() { throw new Error("no gates today"); } };`)]);
+  await assert.rejects(collectExtensionGates(thrower, { request: null, result: null, workspace: "/repo" }), (error) => error.reason === "extension-gate-invalid");
+});
+
+test("observers are best effort: errors are reported, never thrown", async () => {
+  const seen = [];
+  const extensions = await loadBridgeExtensions([
+    writeExtension(`export default { apiVersion: 1, name: "fails", observe() { throw new Error("observer down"); } };`, "a.mjs"),
+    writeExtension(`export default { apiVersion: 1, name: "async-fails", async observe() { throw new Error("async down"); } };`, "b.mjs"),
+    writeExtension(`export default { apiVersion: 1, name: "records", observe(event) { globalThis.__bridgeObserved = event.type; } };`, "c.mjs")
+  ]);
+  await notifyExtensionObservers(extensions, { type: "started" }, { onError: (error, extension) => seen.push(`${extension}: ${error.message}`) });
+  assert.deepEqual(seen, ["fails: observer down", "async-fails: async down"]);
+  assert.equal(globalThis.__bridgeObserved, "started");
+  await assert.doesNotReject(notifyExtensionObservers(extensions, { type: "completed" }));
+});
