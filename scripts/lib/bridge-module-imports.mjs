@@ -4,8 +4,9 @@
 // declaration is recognised with comments or line breaks between its tokens.
 //
 // It is not a parser. It does not check that the source is valid, a dynamic import() is not listed,
-// and a slash is told to start a regular expression rather than a division from the token before it,
-// which is right for ordinary code. The extension loader uses it to word a message and to refuse the
+// a specifier is returned as written between its quotes (a string escape in it is not decoded), and a
+// slash is told to start a regular expression rather than a division from the token before it, which
+// is right for ordinary code. The extension loader uses it to word a message and to refuse the
 // one import the module system accepts and should not: a static import by absolute file: URL.
 
 // A slash after one of these words starts a regular expression; after any other word it divides.

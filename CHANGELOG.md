@@ -38,7 +38,9 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   supported Node, so the digest a recovered job compares covers the module that
   runs. The loader tokenizes the module to find imports, so import-like text in a
   string, a template or a comment is not one and a comment inside an import does
-  not hide it. A dynamic `import()` is outside what a loader can refuse.
+  not hide it. The check reads a specifier as written, and a dynamic `import()`
+  is outside what a loader can refuse: the digest is a recovery signal against
+  drift in good-faith use, not a defence against the extension's author.
 - A v2 result requires the worker's native session once the job completed (a
   UUID for Claude), and a v2 receipt requires the effective settings once the
   worker completed or the verification finished; a pending or skipped

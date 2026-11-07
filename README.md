@@ -395,7 +395,11 @@ readable.
   verification checks and observe events. An extension is one self-contained
   module (it may import `node:` modules only; a relative, package or `file:` URL
   import fails when it loads). Loading fails closed, and each module's sha256 is
-  recorded, so a recovered job reports a changed one.
+  recorded, so a recovered job reports a changed one. The digest is a recovery
+  signal against drift in good-faith use, not a defence against the extension's
+  author: extensions carry the same trust as the CLI, and a dynamic `import()` or
+  an import specifier written with a string escape is outside what the loader
+  can check.
 
 See [the migration contract](docs/bridge-migration.md) for the profile table,
 the config keys and the extension API.

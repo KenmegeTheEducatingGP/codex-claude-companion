@@ -14,8 +14,10 @@
 // a string, a template or a comment is skipped and a comment inside an import does not
 // hide it; see bridge-module-imports.mjs). Only node: modules can be imported by name.
 // What no loader can refuse stays outside the digest: a dynamic import() and any
-// other way an extension reads and runs other files. An extension that does that
-// owns the drift.
+// other way an extension reads and runs other files, and a static import whose
+// specifier is spelled with a string escape (the tokenizer reads it as written). An
+// extension that does that owns the drift: the digest is a recovery signal against
+// drift in good-faith use, not a defence against the extension's author.
 
 import crypto from "node:crypto";
 import fs from "node:fs";

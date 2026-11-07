@@ -234,9 +234,10 @@ code it runs (`import.meta.url` is not a file location). The loader refuses a
 relative, package or absolute `file:` URL import when the extension loads (the
 `file:` check tokenizes the module: import-like text in a string, a template or a
 comment is skipped, and a comment inside an import does not hide it; it does not
-parse the module, so it does not check that the source is valid). A dynamic
-`import()` and any other way of reading and running other files are outside what
-a loader can refuse, and the digest does not cover them:
+parse the module, so it does not check that the source is valid, and it reads a
+specifier as written, so one spelled with a string escape is not recognised). A
+dynamic `import()` and any other way of reading and running other files are
+outside what a loader can refuse, and the digest does not cover them:
 
 | Hook | Called with | Returns | On failure |
 |---|---|---|---|
@@ -253,8 +254,10 @@ name. The
 loader imports exactly the bytes it hashes and records that sha256, which
 therefore covers the module that runs. A receipt keeps each extension's name and
 sha256; the broker keeps the path as well (`recordBridgeExtensions`). A recovered
-job imports the file again and reports any digest change, so changed code never
-runs unnoticed. Extensions carry the same trust as the command-line tool itself.
+job imports the file again and reports any digest change, so a changed module
+never runs unnoticed. Extensions carry the same trust as the command-line tool
+itself: the digest is a recovery signal against drift in good-faith use, not a
+defence against the extension's author.
 
 ### Rollback
 
