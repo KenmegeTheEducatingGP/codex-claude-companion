@@ -123,7 +123,7 @@ jobs:
 
       - name: Run Claude auto review with workload identity
         if: steps.preflight.outputs.mode == 'federation'
-        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         with:
           # Static credentials take precedence inside the action, so this
           # step must pass only federation auth inputs, never static credentials.
@@ -146,7 +146,7 @@ jobs:
 
       - name: Run Claude auto review with OAuth
         if: steps.preflight.outputs.mode == 'oauth'
-        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         with:
           # JUSTIFIED: anthropic_api_key omitted on purpose. When the
           # ANTHROPIC_API_KEY secret is unset, ${{ secrets.* }} resolves
@@ -187,7 +187,7 @@ jobs:
 
       - name: Run Claude auto review with API key
         if: steps.preflight.outputs.mode == 'api'
-        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           use_sticky_comment: true
@@ -342,7 +342,7 @@ jobs:
 
       - name: Run Claude interactive response with workload identity
         if: steps.preflight.outputs.mode == 'federation'
-        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         with:
           # Never pass a static credential here: it would shadow federation.
           anthropic_federation_rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -357,7 +357,7 @@ jobs:
 
       - name: Run Claude interactive response with OAuth
         if: steps.preflight.outputs.mode == 'oauth'
-        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         with:
           # JUSTIFIED: anthropic_api_key omitted on purpose; same reason
           # as the auto-review job above. Empty-string api key from an
@@ -381,7 +381,7 @@ jobs:
 
       - name: Run Claude interactive response with API key
         if: steps.preflight.outputs.mode == 'api'
-        uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: >-
