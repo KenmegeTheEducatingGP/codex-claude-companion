@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
 
 import {
   BRIDGE_EXTENSION_API_VERSION,
@@ -150,6 +151,37 @@ test("the message for a refused import names the import whichever way this Node 
   assert.ok(!nothingToName.includes(" imports "), "no specifier is invented");
   assert.match(describe(file, Buffer.from("export default {};"), new Error("boom at import")), /failed to import: boom at import/,
     "any other failure keeps its own message");
+});
+
+// The module system refuses a relative or package import from the module the loader builds, but it
+// loads an import by absolute file: URL, which would put a helper outside the digest. The loader
+// refuses a static import of one itself, from the source, the same way on every Node.
+test("a static import by absolute file: URL is refused at load, like a relative one", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-fileurl-"));
+  const helper = path.join(dir, "helper.mjs");
+  fs.writeFileSync(helper, `export const helper = () => "v1";`);
+  const url = pathToFileURL(helper).href;
+  const upper = url.replace(/^file:/, "FILE:");
+  const tail = `export default { apiVersion: 1, name: "outside", observe() {} };`;
+  const forms = {
+    "a named import": [`import { helper } from ${JSON.stringify(url)};\n${tail}`, url],
+    "a side-effect import in single quotes": [`import '${url}';\n${tail}`, url],
+    "a re-export": [`export { helper } from ${JSON.stringify(url)};\n${tail}`, url],
+    "a multi-line import": [`import {\n  helper\n} from ${JSON.stringify(url)};\n${tail}`, url],
+    "an upper-case scheme": [`import { helper } from ${JSON.stringify(upper)};\n${tail}`, upper]
+  };
+  for (const [label, [source, specifier]] of Object.entries(forms)) {
+    await assert.rejects(loadBridgeExtensions([writeExtension(source)]), (error) =>
+      loadFailure(/self-contained/)(error) && error.message.includes(JSON.stringify(specifier)) && error.message.length < 600,
+    `${label}: refused at load, and the message names the import`);
+  }
+  const notImports = writeExtension([
+    `// import { nope } from ${JSON.stringify(url)};`,
+    `const note = 'import { nope } from "${url}"';`,
+    `export default { apiVersion: 1, name: "plain", note };`
+  ].join("\n"));
+  const [plain] = await loadBridgeExtensions([notImports]);
+  assert.equal(plain.name, "plain", "a commented-out import and import-like text inside a string are not imports");
 });
 
 // Guard, green at base: whatever the loader does with the bytes, an error thrown by
