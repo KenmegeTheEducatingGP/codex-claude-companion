@@ -19,6 +19,7 @@ import {
   reloadBridgeExtensions,
   selectExtensionAccount
 } from "../scripts/lib/bridge-extensions.mjs";
+import * as bridgeExtensions from "../scripts/lib/bridge-extensions.mjs";
 
 function writeExtension(source, name = "extension.mjs") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-"));
@@ -108,7 +109,47 @@ test("an extension is one self-contained module, so its digest covers all the co
   const lazy = path.join(dir, "lazy.mjs");
   fs.writeFileSync(lazy, `export default { apiVersion: 1, name: "lazy", async observe() { return (await import("./helper.mjs")).helper(); } };`);
   const [lazyLoaded] = await loadBridgeExtensions([lazy]);
-  await assert.rejects(Promise.resolve().then(() => lazyLoaded.hooks.observe({})), /helper\.mjs/, "a lazy local import fails when it runs, never silently");
+  // The error is Node's own and its text differs by version (20 and later name the specifier, 18
+  // reports a bare "Invalid URL"), so this pins what Node refused, not how it words it.
+  await assert.rejects(Promise.resolve().then(() => lazyLoaded.hooks.observe({})),
+    (error) => ["ERR_UNSUPPORTED_RESOLVE_REQUEST", "ERR_INVALID_URL"].includes(error?.code),
+    "a lazy local import fails when it runs, never silently");
+});
+
+// Node words a refused local import differently by version: 20 and later name the specifier and
+// quote the whole encoded module as its base (ERR_UNSUPPORTED_RESOLVE_REQUEST), 18 reports a bare
+// "Invalid URL" (ERR_INVALID_URL). The loader's message names the import either way: from Node's
+// text when that has the specifier, from the extension's own source when it does not.
+test("the message for a refused import names the import whichever way this Node reports it", () => {
+  const describe = bridgeExtensions.describeExtensionImportFailure;
+  assert.equal(typeof describe, "function", "the loader exports the function that words the message");
+  const file = "/extensions/router.mjs";
+  const namesIt = Object.assign(new Error(`Failed to resolve module specifier "./helper.mjs" from "data:text/javascript;base64,${"QUJD".repeat(400)}": Invalid relative URL or base scheme is not hierarchical.`), { code: "ERR_UNSUPPORTED_RESOLVE_REQUEST" });
+  const bare = Object.assign(new TypeError("Invalid URL"), { code: "ERR_INVALID_URL" });
+  const forms = {
+    "a named import": `import { helper } from "./helper.mjs";\nexport default {};`,
+    "a default import in single quotes": `import helper from './helper.mjs';\nexport default {};`,
+    "a namespace import": `import * as helper from "./helper.mjs";\nexport default {};`,
+    "a side-effect import": `import "./helper.mjs";\nexport default {};`,
+    "a re-export": `export { helper } from "./helper.mjs";\nexport default {};`,
+    "a multi-line import": `import {\n  helper,\n  other\n} from "./helper.mjs";\nexport default {};`,
+    "an import after node: and bare built-in imports": `import path from "node:path";\nimport fs from "fs";\nimport { helper } from "./helper.mjs";\nexport default { path, fs };`,
+    "an import after a commented-out one": `// import { nope } from "./not-this.mjs";\nimport { helper } from "./helper.mjs";\nexport default {};`
+  };
+  for (const [label, source] of Object.entries(forms)) {
+    const message = describe(file, Buffer.from(source), bare);
+    assert.ok(message.includes(`"./helper.mjs"`), `${label}: names the import, got: ${message}`);
+    assert.match(message, /self-contained/, label);
+    assert.ok(message.length < 600, `${label}: stays short`);
+  }
+  const fromNode = describe(file, Buffer.from(`export default {};`), namesIt);
+  assert.ok(fromNode.includes(`"./helper.mjs"`) && /self-contained/.test(fromNode) && fromNode.length < 600,
+    "a Node that names the specifier is believed, and the encoded module is not echoed");
+  const nothingToName = describe(file, Buffer.from(`import path from "node:path";\nexport default { path };`), bare);
+  assert.match(nothingToName, /Invalid URL/, "with nothing to name, Node's own text is kept");
+  assert.ok(!nothingToName.includes(" imports "), "no specifier is invented");
+  assert.match(describe(file, Buffer.from("export default {};"), new Error("boom at import")), /failed to import: boom at import/,
+    "any other failure keeps its own message");
 });
 
 // Guard, green at base: whatever the loader does with the bytes, an error thrown by
