@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -8,6 +9,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import * as bridgeContracts from "../scripts/lib/bridge-contracts.mjs";
+import * as bridgeExtensions from "../scripts/lib/bridge-extensions.mjs";
 import * as bridgePolicy from "../scripts/lib/bridge-policy.mjs";
 
 // Namespace imports keep a missing export from failing the whole file at import time,
@@ -589,6 +591,81 @@ test("v2 receipts add the waiter route, queued delivery, cross-family verifier, 
     () => validateBridgeReceiptContract(deliveredBeforeCreation),
     (error) => error.phase === "semantics" && /chronology is invalid/.test(error.message)
   );
+});
+
+test("v2 completed results name the worker's native session, a UUID for Claude", () => {
+  for (const workerFamily of ["claude", "codex"]) {
+    const nativeSession = workerFamily === "claude" ? WORKER_SESSION_ID : "thread-worker-1";
+    accepts(validateBridgeResultContract, v2Result({ workerFamily, workerSessionId: nativeSession }), `${workerFamily} completed with its session`);
+    rejects(validateBridgeResultContract, v2Result({ workerFamily, workerSessionId: null }), undefined,
+      `${workerFamily} completed without a session leaves messaging and continuation unable to find the worker`);
+    // A worker that failed or was cancelled may never have started a session.
+    for (const status of ["failed", "cancelled"]) {
+      accepts(validateBridgeResultContract, v2Result({ workerFamily, status, workerSessionId: null }), `${workerFamily} ${status} without a session`);
+    }
+  }
+  rejects(validateBridgeResultContract, v2Result({ workerFamily: "claude", workerSessionId: "thread-worker-1" }), undefined, "a Claude session id is a UUID");
+  rejects(validateBridgeResultContract, v2Result({ workerFamily: "claude", status: "failed", workerSessionId: "not-a-uuid" }), undefined,
+    "a Claude session id is a UUID whatever the status");
+});
+
+test("v2 receipts record the effective settings once the worker has completed or the verifier has finished", () => {
+  const receipt = v2Receipt();
+  accepts(validateBridgeReceiptContract, receipt);
+
+  // Members are null where a family reports none; the record itself still exists.
+  const reportedNothing = structuredClone(receipt);
+  reportedNothing.worker.effective = emptyEffective();
+  reportedNothing.verification.effective = emptyEffective();
+  accepts(validateBridgeReceiptContract, reportedNothing, "an all-null record means the family reported nothing");
+
+  // Before the worker reports, and when nothing ran, null is the honest value.
+  const running = structuredClone(receipt);
+  running.workerState = "running";
+  running.worker.effective = null;
+  running.delivery = { state: "pending", route: null, attempts: 0, deliveredAt: null, acknowledgedAt: null, lastError: null };
+  running.verification = { state: "pending", verifiedAt: null, evidence: [], verifierFamily: "codex", effective: null, integrity: null };
+  accepts(validateBridgeReceiptContract, running, "a running worker has not reported yet");
+  const failedWorker = structuredClone(running);
+  failedWorker.workerState = "failed";
+  failedWorker.workerError = "the worker never started";
+  accepts(validateBridgeReceiptContract, failedWorker, "a worker that failed before reporting has no settings to record");
+  const skipped = structuredClone(receipt);
+  skipped.verification = { state: "skipped", verifiedAt: "2026-07-18T12:03:00Z", evidence: ["no verifier available"], verifierFamily: "codex", effective: null, integrity: null };
+  accepts(validateBridgeReceiptContract, skipped, "a skipped verification ran no verifier");
+
+  for (const [label, mutate] of [
+    ["a completed worker without its effective settings", (candidate) => { candidate.worker.effective = null; }],
+    ["a passed verification without the verifier's effective settings", (candidate) => { candidate.verification.effective = null; }],
+    ["a failed verification without the verifier's effective settings", (candidate) => {
+      candidate.verification.state = "failed";
+      candidate.verification.evidence = ["verifier-mutated-workspace"];
+      candidate.verification.integrity = { mutated: true };
+      candidate.verification.effective = null;
+    }]
+  ]) {
+    const invalid = structuredClone(receipt);
+    mutate(invalid);
+    rejects(validateBridgeReceiptContract, invalid, undefined, label);
+  }
+});
+
+test("the extension digests a v2 receipt keeps carry no path, and the recovery record keeps it", async () => {
+  const { describeBridgeExtensions, loadBridgeExtensions, recordBridgeExtensions, reloadBridgeExtensions } = bridgeExtensions;
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-receipt-")), "extension.mjs");
+  fs.writeFileSync(file, `export default { apiVersion: 1, name: "example", observe() {} };`);
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const loaded = await loadBridgeExtensions([file]);
+
+  const receipt = v2Receipt();
+  receipt.extensions = describeBridgeExtensions(loaded);
+  assert.deepEqual(receipt.extensions, [{ name: "example", sha256: digest }]);
+  accepts(validateBridgeReceiptContract, receipt, "the descriptor a receipt keeps must validate in that receipt");
+
+  assert.equal(typeof recordBridgeExtensions, "function", "the broker's recovery record is its own export");
+  const recorded = recordBridgeExtensions(loaded);
+  assert.deepEqual(recorded, [{ name: "example", path: file, sha256: digest }]);
+  assert.deepEqual((await reloadBridgeExtensions(recorded)).changed, [], "a recovered job re-imports the recorded path");
 });
 
 test("the v2 profile enum matches the published profile table", () => {

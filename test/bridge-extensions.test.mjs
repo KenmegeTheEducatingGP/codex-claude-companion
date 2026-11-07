@@ -86,6 +86,44 @@ test("a recovered job re-imports its extensions and reports a changed digest", a
   assert.deepEqual(reloaded.changed, [{ name: "drift", path: file, recordedSha256: recorded[0].sha256, currentSha256: sha256File(file) }]);
 });
 
+// The digest is the recovery integrity signal, so it must cover all the code an
+// extension runs. An extension is therefore one self-contained module: the loader
+// executes exactly the bytes it hashed, and an import of another file fails closed
+// at load instead of leaving a helper outside the digest.
+test("an extension is one self-contained module, so its digest covers all the code it runs", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-split-"));
+  fs.writeFileSync(path.join(dir, "helper.mjs"), `export const helper = () => "v1";`);
+  const split = path.join(dir, "extension.mjs");
+  fs.writeFileSync(split, `import { helper } from "./helper.mjs";\nexport default { apiVersion: 1, name: "split", observe() { helper(); } };`);
+  await assert.rejects(loadBridgeExtensions([split]), (error) =>
+    loadFailure(/self-contained/)(error) && error.message.includes("./helper.mjs") && error.message.length < 600,
+  "a local import is refused, and the message names the import rather than echoing an encoded module");
+
+  const builtin = writeExtension(`import path from "node:path";\nexport default { apiVersion: 1, name: "builtin", observe() { return path.sep; } };`);
+  const [loaded] = await loadBridgeExtensions([builtin]);
+  assert.equal(loaded.name, "builtin", "node: modules are part of the runtime, not of the extension");
+
+  const lazy = path.join(dir, "lazy.mjs");
+  fs.writeFileSync(lazy, `export default { apiVersion: 1, name: "lazy", async observe() { return (await import("./helper.mjs")).helper(); } };`);
+  const [lazyLoaded] = await loadBridgeExtensions([lazy]);
+  await assert.rejects(Promise.resolve().then(() => lazyLoaded.hooks.observe({})), /helper\.mjs/, "a lazy local import fails when it runs, never silently");
+});
+
+// Guard, green at base: whatever the loader does with the bytes, an error thrown by
+// an extension must still name the extension's file in its stack.
+test("an error thrown by an extension names the extension's file in its stack", async () => {
+  const file = writeExtension(`export default { apiVersion: 1, name: "boom", observe() { throw new Error("boom from the extension"); } };`);
+  const [extension] = await loadBridgeExtensions([file]);
+  let stack = "";
+  try {
+    extension.hooks.observe({});
+  } catch (error) {
+    stack = String(error.stack);
+  }
+  assert.match(stack, /boom from the extension/);
+  assert.ok(stack.includes(file), `the stack should name ${file}, got:\n${stack.slice(0, 400)}`);
+});
+
 test("selectAccount accepts only CLAUDE_CONFIG_DIR and CODEX_HOME as absolute paths", async () => {
   const good = await loadBridgeExtensions([writeExtension(`export default { apiVersion: 1, name: "accounts",
     selectAccount({ family }) { return family === "claude" ? { env: { CLAUDE_CONFIG_DIR: "/accounts/two" }, label: "two" } : null; } };`)]);

@@ -196,3 +196,36 @@ test("a routed Codex effort outside the model's supported efforts is dropped wit
   const undiscovered = await resolveRouting(config, [], { request: null, taskFamily: "review" });
   assert.equal(undiscovered.effort, "high", "without live discovery the routed effort is kept");
 });
+
+test("a rule that leaves the family to the host is checked against defaults.workerFamily, and a request's own family wins", async () => {
+  const available = { codex: { models: CODEX_MODELS } };
+  const rules = { effortOnly: { effort: "xhigh" }, modelAndEffort: { model: "model-b", effort: "high" }, supported: { effort: "low" } };
+  const codexDefault = { ...DEFAULT_BRIDGE_CONFIG, defaults: { workerFamily: "codex" }, routing: rules };
+
+  const dropped = await resolveRouting(codexDefault, [], { request: null, taskFamily: "effortOnly", available });
+  assert.equal(dropped.effort, null, "a Codex default worker must not keep an effort its default model does not support");
+  assert.deepEqual(dropped.warnings, [{ code: "effort-unsupported", model: "model-a", effort: "xhigh", supported: ["low", "high"] }]);
+  const droppedForModel = await resolveRouting(codexDefault, [], { request: null, taskFamily: "modelAndEffort", available });
+  assert.equal(droppedForModel.effort, null);
+  assert.deepEqual(droppedForModel.warnings, [{ code: "effort-unsupported", model: "model-b", effort: "high", supported: ["medium"] }]);
+  const kept = await resolveRouting(codexDefault, [], { request: null, taskFamily: "supported", available });
+  assert.equal(kept.effort, "low");
+  assert.deepEqual(kept.warnings, []);
+
+  // A Claude default, and a request whose worker is Claude, are never checked against Codex models.
+  const claudeDefault = await resolveRouting({ ...codexDefault, defaults: { workerFamily: "claude" } }, [], { request: null, taskFamily: "effortOnly", available });
+  assert.equal(claudeDefault.effort, "xhigh");
+  const claudeRequest = await resolveRouting(codexDefault, [], { request: { worker: { family: "claude" } }, taskFamily: "effortOnly", available });
+  assert.equal(claudeRequest.effort, "xhigh", "the request's worker family decides before the config default");
+  const noDefault = await resolveRouting({ ...codexDefault, defaults: {} }, [], { request: null, taskFamily: "effortOnly", available });
+  assert.equal(noDefault.effort, "xhigh", "with no family anywhere the host decides and nothing is checked");
+});
+
+test("the config schema accepts an absolute extension path of every platform and still rejects a relative one", () => {
+  const absolute = ["/opt/extensions/router.mjs", "C:\\accounts\\router.mjs", "d:/accounts/router.mjs", "\\\\server\\share\\router.mjs"];
+  const document = { schemaVersion: 1, extensions: absolute };
+  assert.equal(validateBridgeConfigContract(document), document, "the loader judges absoluteness for the platform it runs on");
+  for (const relative of ["relative/extension.mjs", "./extension.mjs", "..\\extension.mjs", "extension.mjs", "C:extension.mjs", ""]) {
+    assert.throws(() => validateBridgeConfigContract({ schemaVersion: 1, extensions: [relative] }), undefined, JSON.stringify(relative));
+  }
+});
