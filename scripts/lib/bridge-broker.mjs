@@ -9,6 +9,9 @@ import * as bridgeState from "./bridge-state.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+// The broker spec versions this release can run. A spec written by a newer
+// release is refused outright, so a downgrade can never misread it.
+const SUPPORTED_SPEC_VERSIONS = Object.freeze([1]);
 
 function privateRegularFile(file) {
   const stat = fs.lstatSync(file);
@@ -34,6 +37,13 @@ function safeError(error) {
 
 function validateSpec(spec) {
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("broker spec must be an object");
+  if (!SUPPORTED_SPEC_VERSIONS.includes(spec.schemaVersion)) {
+    const found = Object.hasOwn(spec, "schemaVersion") ? JSON.stringify(spec.schemaVersion) : "(missing)";
+    throw new Error(
+      `broker spec schemaVersion ${found} is not supported by this release ` +
+      `(supported: ${SUPPORTED_SPEC_VERSIONS.join(", ")}); finish or cancel this job with the release that created it`
+    );
+  }
   if (!/^ccb_[0-9A-HJKMNP-TV-Z]{26}$/.test(spec.jobId ?? "")) throw new Error("broker spec has an invalid job id");
   if (typeof spec.prompt !== "string" || spec.prompt.length === 0) throw new Error("broker spec requires a durable prompt");
   if (!CAPABILITY_PATTERN.test(spec.workerCapabilityToken ?? "")) throw new Error("broker spec requires a job-bound worker capability");
