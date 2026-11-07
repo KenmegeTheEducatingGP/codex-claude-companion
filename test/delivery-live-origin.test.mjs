@@ -144,13 +144,17 @@ function cliHarness({ pollMs = 10 } = {}) {
   };
   return {
     brokerStarts: () => brokerStarts,
+    // `extra.write` sees each chunk after it is recorded, and may throw or return a promise.
     async run(command, argv, extra = {}) {
       let text = "";
       try {
         const exitCode = await handleBridgeCommand(command, argv, {
           ...deps,
           ...extra,
-          write: (chunk) => { text += chunk; }
+          write: (chunk) => {
+            text += chunk;
+            return extra.write?.(chunk);
+          }
         });
         return { exitCode, text, error: null };
       } catch (error) {
@@ -520,4 +524,161 @@ test("an origin's status of a queued job older than the newest 64 delivers its r
   assert.equal(countOf(askedPlain.text, "Implemented and verified the change."), 1,
     `the status that delivers the result must print it (once); its plain-text output was:\n${askedPlain.text}`);
   assert.equal(readDelivery(asText.jobId, asText.brokerOptions).state, "acknowledged");
+});
+
+// The origin's output is the delivery, so a result is acknowledged only after that
+// output was written. A write that fails (a closed pipe, a full disk) leaves the
+// result deliverable instead of recorded as delivered (review P1). A command
+// claims, writes, and then acknowledges.
+const refusedWrite = () => {
+  throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+};
+
+test("an origin command acknowledges a queued result only after it wrote it (D2, P1)", async () => {
+  const thread = "thread-live-origin-l";
+  const { root, done, running } = await threadWithQueuedResult("ccb-live-origin-order-", thread);
+  const duringWrite = [];
+  const asked = await cliHarness().run("status", [running.jobId, "--json", "--state-dir", root.stateRoot], {
+    codexThreadId: thread,
+    write: () => { duringWrite.push(readDelivery(done.jobId, done.brokerOptions).state); }
+  });
+  assert.equal(asked.error, null, asked.error?.message);
+  assert.deepEqual(duringWrite, ["inbox_claimed"],
+    "while the output is written the result is claimed, not yet acknowledged");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "acknowledged");
+});
+
+test("a failed write leaves the queued result queued, and the next origin command delivers it (D2, P1)", async () => {
+  const thread = "thread-live-origin-m";
+  const fixture = await threadWithQueuedResult("ccb-live-origin-writefail-", thread);
+  const { root, done, running } = fixture;
+  const cli = cliHarness();
+
+  const failed = await cli.run("status", [running.jobId, "--json", "--state-dir", root.stateRoot], {
+    codexThreadId: thread, write: refusedWrite
+  });
+  assert.match(failed.error?.message ?? "", /write EPIPE/, "the command reports the failed write");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
+    "the output was not written, so the queued result must be deliverable again");
+
+  await assertNextOriginCommandDelivers(cli, fixture, thread);
+});
+
+test("the origin's wait for a queued job acknowledges it only after it wrote it, and exits 0 (D2, P1)", async () => {
+  const job = createVerifiedJob("ccb-live-origin-wait-order-", "ccb_00000000000000000000D2F010", "thread-live-origin-n");
+  await deliverBridgeResult({
+    result: job.result,
+    receipt: readReceipt(job.jobId, job.brokerOptions),
+    origin: job.origin,
+    stateOperations: job.coordination,
+    originAdapter: busyOrigin(job.threadId).adapter
+  });
+  assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "inbox");
+  const duringWrite = [];
+  const waited = await cliHarness().run("wait", [job.jobId, "--json", "--state-dir", job.stateRoot, "--timeout", "2"], {
+    codexThreadId: job.threadId,
+    write: () => { duringWrite.push(readDelivery(job.jobId, job.brokerOptions).state); }
+  });
+  assert.equal(waited.error, null, waited.error?.message);
+  assert.equal(waited.exitCode, 0, "the acknowledgement that follows the write is what exit 0 reports");
+  assert.deepEqual(duringWrite, ["inbox_claimed"]);
+  assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "acknowledged");
+});
+
+test("the origin's wait acknowledges the waiter's claim only after it wrote the result, and exits 0 (D2, P1)", async () => {
+  const job = createVerifiedJob("ccb-live-origin-waiter-order-", "ccb_00000000000000000000D2F011", "thread-live-origin-o");
+  const origin = busyOrigin(job.threadId);
+  const duringWrite = [];
+  const waiting = cliHarness().run("wait", [job.jobId, "--json", "--state-dir", job.stateRoot, "--timeout", "5"], {
+    codexThreadId: job.threadId,
+    write: () => { duringWrite.push(readDelivery(job.jobId, job.brokerOptions).state); }
+  });
+  await delay(100);
+  const broker = await runBrokerOnce(job, origin.adapter, { maxSleeps: 300, sleepMs: 10 });
+  const waited = await waiting;
+  assert.equal(origin.calls(), 0, "the broker must hand delivery to the live waiter");
+  assert.equal(waited.error, null, waited.error?.message);
+  assert.equal(waited.exitCode, 0);
+  assert.equal(broker.error, null, broker.error?.message);
+  assert.deepEqual(duringWrite, ["claimed"], "while the output is written the waiter's claim is held, not acknowledged");
+  assert.equal(readDelivery(job.jobId, job.brokerOptions).state, "acknowledged");
+});
+
+test("a failed write leaves the waiter's claim unacknowledged (D2, P1)", async () => {
+  const job = createVerifiedJob("ccb-live-origin-waiter-writefail-", "ccb_00000000000000000000D2F012", "thread-live-origin-p");
+  const origin = busyOrigin(job.threadId);
+  const waiting = cliHarness().run("wait", [job.jobId, "--json", "--state-dir", job.stateRoot, "--timeout", "5"], {
+    codexThreadId: job.threadId, write: refusedWrite
+  });
+  await delay(100);
+  // The broker keeps waiting for the acknowledgement that never comes and gives up.
+  await runBrokerOnce(job, origin.adapter, { maxSleeps: 30, sleepMs: 10 });
+  const waited = await waiting;
+  assert.match(waited.error?.message ?? "", /write EPIPE/, "the wait reports the failed write");
+  assert.notEqual(readDelivery(job.jobId, job.brokerOptions).state, "acknowledged",
+    "the result was not written, so it must not be recorded as delivered");
+});
+
+test("a delegate whose write fails leaves the queued result queued (D2, P1)", async () => {
+  const thread = "thread-live-origin-q";
+  const root = createRoot("ccb-live-origin-delegate-write-");
+  const done = createVerifiedJob("ccb-live-origin-delegate-write-", "ccb_00000000000000000000D2F013", thread, { root });
+  await deliverBridgeResult({
+    result: done.result,
+    receipt: readReceipt(done.jobId, done.brokerOptions),
+    origin: done.origin,
+    stateOperations: done.coordination,
+    originAdapter: busyOrigin(thread).adapter
+  });
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox");
+
+  const delegated = await cliHarness().run("delegate", [
+    "--prompt", "second task", "--verify-command", JSON.stringify([process.execPath, "-e", "0"]),
+    "--path", root.workspace, "--thread-id", thread, "--state-dir", root.stateRoot,
+    "--tmux", process.execPath, "--claude", process.execPath, "--codex", process.execPath, "--json"
+  ], { write: refusedWrite });
+  assert.match(delegated.error?.message ?? "", /write EPIPE/, "the delegate reports the failed write");
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
+    "the output was not written, so the queued result must be deliverable again");
+});
+
+// The real thing: process.stdout reports a failed write through the write callback,
+// never as an exception. The child's reader is gone before it writes.
+const STATUS_CHILD = `
+import { handleBridgeCommand } from ${JSON.stringify(CLI_URL)};
+const [stateRoot, jobId, thread] = process.argv.slice(1);
+await new Promise((resolve) => process.stdin.once("data", resolve));
+try {
+  await handleBridgeCommand("status", [jobId, "--json", "--state-dir", stateRoot], {
+    codexThreadId: thread, processAlive: () => false, discoverBrokerPid: () => null, spawnDetached: () => 4242
+  });
+  process.stderr.write("STATUS-WRITTEN\\n");
+} catch (error) {
+  process.stderr.write("STATUS-FAILED " + (error?.code ?? error?.message) + "\\n");
+}
+`;
+
+test("a closed stdout leaves the queued result queued (D2, P1)", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("a closed pipe reports a different error on Windows; the injected-write tests cover the same ground there");
+    return;
+  }
+  const thread = "thread-live-origin-r";
+  const fixture = await threadWithQueuedResult("ccb-live-origin-epipe-", thread);
+  const { root, done, running } = fixture;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", STATUS_CHILD, root.stateRoot, running.jobId, thread], {
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  let diagnostics = "";
+  child.stderr.on("data", (chunk) => { diagnostics += chunk; });
+  const ended = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+  child.stdout.destroy();
+  child.stdin.end("go\n");
+  const exit = await ended;
+
+  assert.equal(readDelivery(done.jobId, done.brokerOptions).state, "inbox",
+    `the child could not write its output, so the queued result must stay deliverable (exit ${JSON.stringify(exit)}): ${diagnostics}`);
+  assert.match(diagnostics, /STATUS-FAILED EPIPE/, "the command reports the failed write");
+
+  await assertNextOriginCommandDelivers(cliHarness(), fixture, thread);
 });
