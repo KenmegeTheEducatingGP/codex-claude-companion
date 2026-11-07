@@ -399,12 +399,15 @@ async function drainOriginQueue(coordination, origin, queued) {
 }
 
 // Read-only scan of the inbox for one Codex thread: the origins, and the ids of
-// the jobs, whose result is queued for it. Nothing is claimed.
-function queuedForThread(bridgeOptions, codexThreadId) {
+// the jobs, whose result is queued for it. Nothing is claimed. It covers the
+// newest AUTO_RECOVERY_SCAN_LIMIT jobs and the jobs the command names, so a
+// command that asks about one older job still finds that job's queued result.
+function queuedForThread(bridgeOptions, codexThreadId, namedJobIds = []) {
   const found = { origins: new Map(), jobIds: new Set() };
   if (!codexThreadId) return found;
   const coordination = originCoordination(bridgeOptions);
-  for (const jobId of listBridgeJobIds(bridgeOptions).reverse().slice(0, AUTO_RECOVERY_SCAN_LIMIT)) {
+  const scanned = new Set([...namedJobIds, ...listBridgeJobIds(bridgeOptions).reverse().slice(0, AUTO_RECOVERY_SCAN_LIMIT)]);
+  for (const jobId of scanned) {
     try {
       const { origin } = bridgeState.readBridgeRequest(jobId, bridgeOptions);
       if (origin?.codexThreadId !== codexThreadId) continue;
@@ -419,14 +422,14 @@ function queuedForThread(bridgeOptions, codexThreadId) {
 }
 
 // Claims and acknowledges every result queued for this Codex thread, bounded
-// like auto-recovery. A command calls it immediately before it writes its
-// output, never at its start: the claim, the acknowledgement and the write are
-// one step, not separated by a wait, a timeout or a later failure. A command
-// that ends before that step has claimed nothing, and the results stay queued
-// for the next origin command.
-async function drainOriginThreadQueue(bridgeOptions, codexThreadId) {
+// like auto-recovery plus the jobs the command names. A command calls it
+// immediately before it writes its output, never at its start: the claim, the
+// acknowledgement and the write are one step, not separated by a wait, a
+// timeout or a later failure. A command that ends before that step has claimed
+// nothing, and the results stay queued for the next origin command.
+async function drainOriginThreadQueue(bridgeOptions, codexThreadId, namedJobIds = []) {
   const queued = [];
-  const { origins } = queuedForThread(bridgeOptions, codexThreadId);
+  const { origins } = queuedForThread(bridgeOptions, codexThreadId, namedJobIds);
   if (origins.size === 0) return queued;
   const coordination = originCoordination(bridgeOptions);
   for (const origin of origins.values()) await drainOriginQueue(coordination, origin, queued);
@@ -713,7 +716,7 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
     // broker, and a command that ends first leaves the results queued.
     originCaller = Boolean(callerThreadId) && targetOrigin?.codexThreadId === callerThreadId;
     const excluded = originCaller && (command === "wait" || command === "status")
-      ? new Set(queuedForThread(bridgeOptions, callerThreadId).jobIds)
+      ? new Set(queuedForThread(bridgeOptions, callerThreadId, targetJobId ? [targetJobId] : []).jobIds)
       : new Set();
     let scope = deps.codexOrigin ?? targetOrigin;
     if (!scope && callerThreadId) scope = { codexThreadId: callerThreadId };
@@ -839,7 +842,7 @@ export async function handleBridgeCommand(command, argv, deps = {}) {
   if (command === "wait") return waitForJob(jobId, bridgeOptions, { ...options, originCaller, threadId: callerThreadId }, deps);
   if (command === "status") {
     // Drain before the snapshot, so a queued job's own status already shows it delivered.
-    const delivered = originCaller ? await drainOriginThreadQueue(bridgeOptions, callerThreadId) : [];
+    const delivered = originCaller ? await drainOriginThreadQueue(bridgeOptions, callerThreadId, [jobId]) : [];
     outputWithQueuedResults(snapshot(jobId, bridgeOptions, { tolerateReceiptError: true }), delivered, options.json, deps.write);
     return 0;
   }
