@@ -96,3 +96,135 @@ closed.
 `codex-claude-companion`, the GitHub repository rename is complete, and Kennedy
 approved the direction. Each public release still fails closed on the recorded
 evidence above.
+
+## Contracts schemaVersion 2, the host profile, and the config file
+
+This section covers the contract and configuration layer for delegation in both
+directions: Codex to Claude, as today, and Claude to Codex. The command-line
+flags that use it arrive in a later change; until then every command keeps
+writing the 1.x contracts described above.
+
+### Versioned contracts
+
+Each file under `schemas/` (request, event, message operation, result, receipt)
+is now a `oneOf` union on `schemaVersion`:
+
+- `$defs.v1` is the 1.2.0 contract, unchanged. A test pins its digest, so a 1.x
+  document validates exactly as before, with the same error messages.
+- `$defs.v2` adds:
+  - an origin family (`codex` or `claude`) and a worker family;
+  - the provider bound to the worker family;
+  - a verifier that is always the other family;
+  - the task family, a `continuesJobId` and the routing provenance
+    (`flag`, `config`, `extension` or `host`, with a reason).
+- A v2 result names `workerFamily` and `workerSessionId` (the Claude session id
+  or the Codex thread id) instead of `claudeSessionId`, and may carry a `plan`.
+- A v2 receipt adds:
+  - the effective worker and verifier settings as each reported them;
+  - the delivery route (`waiter`, `origin` or `inbox`) and the `queued` state;
+  - a verifier integrity record: a passed verification requires
+    `integrity.mutated: false`;
+  - quota events, extension digests, the continuation and repair attempts.
+- In v2, events and message operations can come from either family. The
+  validators check each author against the job's origin and worker families:
+  a `question` comes from the worker, a pending message from the origin, and an
+  acknowledgement from the worker.
+
+Any other `schemaVersion` is a schema error that names the supported versions.
+
+### Reading older jobs
+
+`scripts/lib/bridge-compat.mjs` reads every supported version into one internal
+layout, the v2 field layout:
+
+- `toInternalRequest(doc)` maps a 1.x request to a Codex origin, a Claude worker
+  and the Codex read-only verifier. `claudeSessionId` becomes `workerSessionId`,
+  and `effectiveClaudePermissionArgs` becomes `effectiveWorkerArgs`.
+- `toInternalResult(doc)` does the same for results.
+- `schemaVersion` keeps the persisted version. A 1.x job already in flight
+  therefore finishes under 1.x semantics.
+- The conversion is lossless: every 1.x fixture converts back unchanged with
+  `toV1Request` and `toV1Result`. A document that 1.x cannot express is
+  refused, never truncated.
+
+### The host profile
+
+`host` is a new profile for schemaVersion 2 requests. It passes nothing that
+would override the host's own configuration:
+
+| Profile | The profile passes to a Claude worker or verifier | The profile passes to a Codex worker or verifier |
+|---|---|---|
+| `host` | No permission or setting-source flag | No sandbox or approval parameter |
+| `review-readonly` | The read-only argument set | `sandbox: "read-only"` |
+| `standard` | `--permission-mode default` | Not available |
+| `trusted-autonomous` | `--permission-mode bypassPermissions` | `sandbox: "danger-full-access"`, `approvalPolicy: "never"` |
+| `sandbox-autonomous` | Unavailable | Unavailable |
+
+A model or an effort is sent only when routing resolved one; otherwise the
+host's own configuration chooses them. Read-only access comes only from an
+explicit `review-readonly`. Requests built without a `schemaVersion` are still
+1.x requests, and `host` is not a 1.x profile.
+
+### The config file
+
+The bridge reads an optional JSON file from the first of these that applies:
+
+1. `CODEX_CLAUDE_CONFIG`, which must be an absolute path;
+2. `$XDG_CONFIG_HOME/codex-claude/config.json`, when `XDG_CONFIG_HOME` is
+   absolute;
+3. `~/.config/codex-claude/config.json`.
+
+A missing file changes nothing. A present file must match
+`schemas/bridge-config.schema.json`; otherwise loading fails closed with
+`config_invalid_json`, `config_invalid` or `config_unreadable`. Older versions do
+not read this file. Example:
+
+```json
+{
+  "schemaVersion": 1,
+  "defaults": { "profile": "host", "workerFamily": "claude", "maxRepairs": 1, "overagePolicy": "stop" },
+  "reviewLanePolicy": "host",
+  "presets": { "reviewer": { "profile": "review-readonly" } },
+  "routing": { "review": { "family": "codex", "model": null, "effort": "high" } },
+  "extensions": ["/path/to/extension.mjs"]
+}
+```
+
+- `defaults.profile` cannot be `sandbox-autonomous`. `overagePolicy` accepts only
+  `stop`: the bridge never continues into overage billing.
+- `reviewLanePolicy` is `host`, `review-readonly`, `standard` or `null` (1.x
+  behaviour); it never grants `trusted-autonomous`.
+- `routing` maps a task family to a worker family, a model and an effort. A
+  field left out, or `null`, is left to the host configuration.
+
+Routing resolves in this order: the config entry for the task family, then the
+first extension whose `resolveRouting` answers, else the host decides and the
+bridge sends no model or effort. When live Codex model discovery is available, a
+routed effort that the model does not list in `supportedReasoningEfforts` is
+dropped, with an `effort-unsupported` warning.
+
+### Extensions
+
+An extension is a local module named by absolute path in `extensions`. Its
+default export is `{ apiVersion: 1, name, ...hooks }`:
+
+| Hook | Called with | Returns | On failure |
+|---|---|---|---|
+| `resolveRouting` | `{ request, taskFamily, available }` | `{ family?, model?, effort?, reason }` or `null` | The job fails before launch (`extension-routing-failed`) |
+| `validateResolvedModel` | `{ family, model, phase }` | `{ ok, reason? }` | `ok: false` or a throw fails closed |
+| `selectAccount` | `{ family, request, rateLimit }` | `{ env: { CLAUDE_CONFIG_DIR?, CODEX_HOME? }, label }` or `null` | Any other key, or a relative path, is refused (`extension-account-invalid`) |
+| `gates` | `{ request, result, workspace }` | `[{ name, argv, cwd, timeoutSeconds }]` | An invalid gate fails verification setup (`extension-gate-invalid`) |
+| `observe` | `event` | nothing | Reported and ignored; never fatal |
+
+Loading fails closed with `extension-load-failed` for a relative or missing
+path, a failed import, a wrong `apiVersion`, a missing name, an unknown key or a
+duplicate name. The loader records each file's sha256. A recovered job imports
+the file again and reports any digest change, so changed code never runs
+unnoticed. Extensions carry the same trust as the command-line tool itself.
+
+### Rollback
+
+A release that reads only schemaVersion 1 cannot run a v2 job. Before
+downgrading, settle or cancel the non-terminal v2 jobs (`codex-claude list
+--json`, then `codex-claude cancel <id>`). 1.x jobs stay readable by every
+version, and older versions ignore the config file.

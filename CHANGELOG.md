@@ -13,6 +13,30 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   function summary for the shipped source; CI publishes it on the Linux Node 22
   job. The reporter is development-only and not part of the npm package.
 
+### Two-way contracts, the host profile, and the config file
+
+- Every bridge schema is now a `oneOf` union on `schemaVersion`. The 1.2.0
+  contract is kept unchanged as the v1 branch (a test pins its digest), and the
+  v2 branch describes delegation in both directions: origin and worker families,
+  a verifier of the other family, routing provenance, and receipts with the
+  effective worker and verifier settings, the delivery route, the `queued`
+  state and a verifier integrity record.
+- `scripts/lib/bridge-compat.mjs` reads every supported contract version into
+  one internal layout, so 1.x jobs stay readable and finish under 1.x
+  semantics.
+- The `host` profile, for schemaVersion 2 requests, passes no permission,
+  sandbox or approval setting, so the host configuration decides. Codex
+  workers get exact parameters for `review-readonly` and `trusted-autonomous`;
+  `standard` stays Claude-only.
+- An optional config file (`schemas/bridge-config.schema.json`) sets defaults,
+  per-preset profiles and routing by task family. Extension API v1 loads local
+  modules from absolute paths, records their sha256 and fails closed.
+- The command-line flags that use these arrive in a later change; until then
+  every command keeps writing the 1.x contracts.
+- Fixed: a trust profile name that matches an object prototype key, such as
+  `toString`, is now reported as an unknown profile instead of failing later
+  with a `TypeError`.
+
 ## [1.2.0] — 2026-10-18
 
 ### Changed
