@@ -256,8 +256,10 @@ export async function notifyExtensionObservers(extensions, event, { onError, tim
     let timer;
     try {
       const timeout = new Promise((_, reject) => {
+        // Not unref'd: while an observer is pending this timer is the only thing that can end the
+        // wait. An unref'd timer lets Node exit mid-await when nothing else is alive. `finally`
+        // clears it as soon as the race settles, so it never outlives a finished observer.
         timer = setTimeout(() => reject(new Error(`observe did not finish within ${timeoutMs} ms`)), timeoutMs);
-        timer.unref?.();
       });
       await Promise.race([Promise.resolve().then(() => hook(event)), timeout]);
     } catch (error) {
