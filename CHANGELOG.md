@@ -13,6 +13,51 @@ The format follows Keep a Changelog and this project uses Semantic Versioning.
   function summary for the shipped source; CI publishes it on the Linux Node 22
   job. The reporter is development-only and not part of the npm package.
 
+### Two-way contracts, the host profile, and the config file
+
+- Every bridge schema is now a `oneOf` union on `schemaVersion`. The 1.2.0
+  contract is kept unchanged as the v1 branch (a test pins its digest), and the
+  v2 branch describes delegation in both directions: origin and worker families,
+  a verifier of the other family, routing provenance (with the warnings the
+  routing resolver reports), and receipts with the effective worker and verifier
+  settings, the delivery route, the `queued` state and a verifier integrity
+  record. A request or a receipt that continues its own job is refused.
+  Either family may author a v2 event in the role 1.x gave it: progress,
+  questions, blocked, completed, failed and cancelled come from the job's
+  worker family and a cancel request from its origin family, so an event
+  written by the wrong side of the job is refused.
+- `scripts/lib/bridge-compat.mjs` reads every supported contract version into
+  one internal layout, so 1.x jobs stay readable and finish under 1.x
+  semantics.
+- The `host` profile, for schemaVersion 2 requests, passes no permission,
+  sandbox or approval setting, so the host configuration decides. Codex
+  workers get exact parameters for `review-readonly` and `trusted-autonomous`;
+  `standard` stays Claude-only.
+- An optional config file (`schemas/bridge-config.schema.json`) sets defaults,
+  per-preset profiles and routing by task family. Extension API v1 loads local
+  modules from absolute paths (POSIX, Windows drive or UNC), records their
+  sha256 and fails closed. An extension is one self-contained module: the loader
+  runs exactly the bytes it hashes and refuses a relative, package or absolute
+  `file:` URL import when it loads, with a message that names the import on every
+  supported Node, so the digest a recovered job compares covers the module that
+  runs. The loader tokenizes the module to find imports, so import-like text in a
+  string, a template or a comment is not one and a comment inside an import does
+  not hide it. The check reads a specifier as written, and a dynamic `import()`
+  is outside what a loader can refuse: the digest is a recovery signal against
+  drift in good-faith use, not a defence against the extension's author.
+- A v2 result requires the worker's native session once the job completed (a
+  UUID for Claude), and a v2 receipt requires the effective settings once the
+  worker completed or the verification finished; a pending or skipped
+  verification ran no verifier and records none. The extension digests a
+  receipt keeps are name and sha256 only; the broker's recovery record keeps the
+  path. A routing rule that leaves the family to the host has its Codex effort
+  checked against `defaults.workerFamily`.
+- The command-line flags that use these arrive in a later change; until then
+  every command keeps writing the 1.x contracts.
+- Fixed: a trust profile name that matches an object prototype key, such as
+  `toString`, is now reported as an unknown profile instead of failing later
+  with a `TypeError`.
+
 ### Fixed
 
 - Bridge delivery no longer rewrites the origin Codex thread's permissions. The

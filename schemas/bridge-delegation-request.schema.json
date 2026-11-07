@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Kenmege/codex-claude-companion/schemas/bridge-delegation-request.schema.json",
   "title": "Codex-Claude Bridge delegation request",
+  "description": "Versioned request envelope persisted before a worker is dispatched. schemaVersion 1 ($defs.v1) is the unchanged 1.x contract: a Codex origin, a Claude worker and a Codex verifier. schemaVersion 2 ($defs.v2) names the origin, worker and verifier families; the verifier family always differs from the worker family.",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": { "schemaVersion": { "enum": [1, 2] } },
+  "oneOf": [{ "$ref": "#/$defs/v1" }, { "$ref": "#/$defs/v2" }],
+  "$defs": {
+  "v1": {
+  "title": "Codex-Claude Bridge delegation request",
   "description": "Immutable request envelope persisted before a Claude worker is dispatched.",
   "type": "object",
   "additionalProperties": false,
@@ -106,8 +114,8 @@
         "acceptance": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
       }
     }
+  }
   },
-  "$defs": {
     "jobId": { "type": "string", "pattern": "^ccb_[0-9A-HJKMNP-TV-Z]{26}$" },
     "absolutePath": { "type": "string", "pattern": "^/" },
     "pathArray": { "type": "array", "items": { "$ref": "#/$defs/absolutePath" } },
@@ -151,6 +159,255 @@
       ],
       "minItems": 52,
       "maxItems": 52
+    },
+    "v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "jobId", "origin", "worker", "execution", "verification", "task", "routing"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "jobId": { "$ref": "#/$defs/jobId" },
+        "origin": { "$ref": "#/$defs/v2Origin" },
+        "worker": { "$ref": "#/$defs/v2Worker" },
+        "execution": { "$ref": "#/$defs/v2Execution" },
+        "verification": { "$ref": "#/$defs/v2Verification" },
+        "task": { "$ref": "#/$defs/v2Task" },
+        "routing": { "$ref": "#/$defs/v2Routing" }
+      },
+      "allOf": [
+        {
+          "if": { "$ref": "#/$defs/v2WhenClaudeWorker" },
+          "then": {
+            "properties": {
+              "execution": { "allOf": [{ "$ref": "#/$defs/v2ClaudeProfileMapping" }, { "type": "object", "properties": { "workerSessionId": { "type": "string", "format": "uuid" } } }] },
+              "verification": { "type": "object", "properties": { "family": { "const": "codex" } } }
+            }
+          }
+        },
+        {
+          "if": { "$ref": "#/$defs/v2WhenCodexWorker" },
+          "then": {
+            "properties": {
+              "execution": { "allOf": [{ "$ref": "#/$defs/v2CodexProfileMapping" }, { "type": "object", "properties": { "workerSessionId": { "type": "null" } } }] },
+              "verification": { "type": "object", "properties": { "family": { "const": "claude" } } }
+            }
+          }
+        },
+        {
+          "if": { "allOf": [{ "$ref": "#/$defs/v2WhenClaudeWorker" }, { "$ref": "#/$defs/v2WhenHostProfile" }] },
+          "then": { "properties": { "worker": { "type": "object", "properties": { "claude": { "type": "object", "properties": { "settingSources": { "type": "null" } } } } } } }
+        },
+        {
+          "if": { "allOf": [{ "$ref": "#/$defs/v2WhenClaudeWorker" }, { "not": { "$ref": "#/$defs/v2WhenHostProfile" } }] },
+          "then": { "properties": { "worker": { "type": "object", "properties": { "claude": { "type": "object", "properties": { "settingSources": { "type": "array" } } } } } } }
+        },
+        {
+          "if": { "type": "object", "required": ["routing"], "properties": { "routing": { "type": "object", "required": ["source"], "properties": { "source": { "const": "host" } } } } },
+          "then": { "properties": { "worker": { "type": "object", "properties": { "model": { "type": "null" }, "effort": { "type": "null" } } } } }
+        }
+      ]
+    },
+    "v2Family": { "enum": ["claude", "codex"] },
+    "v2Profile": { "enum": ["host", "review-readonly", "standard", "trusted-autonomous", "sandbox-autonomous"] },
+    "v2TaskFamily": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" },
+    "v2WhenClaudeWorker": {
+      "type": "object",
+      "required": ["worker"],
+      "properties": { "worker": { "type": "object", "required": ["family"], "properties": { "family": { "const": "claude" } } } }
+    },
+    "v2WhenCodexWorker": {
+      "type": "object",
+      "required": ["worker"],
+      "properties": { "worker": { "type": "object", "required": ["family"], "properties": { "family": { "const": "codex" } } } }
+    },
+    "v2WhenHostProfile": {
+      "type": "object",
+      "required": ["execution"],
+      "properties": { "execution": { "type": "object", "required": ["profile"], "properties": { "profile": { "const": "host" } } } }
+    },
+    "v2Origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "threadId", "turnId", "cwd", "repoRoot", "branch", "head", "accountHome"],
+      "properties": {
+        "family": { "$ref": "#/$defs/v2Family" },
+        "threadId": { "type": "string", "minLength": 1, "description": "Codex thread id, or the Claude session id for a Claude origin." },
+        "turnId": { "type": ["string", "null"], "minLength": 1 },
+        "cwd": { "$ref": "#/$defs/absolutePath" },
+        "repoRoot": { "$ref": "#/$defs/absolutePath" },
+        "branch": { "type": ["string", "null"], "minLength": 1 },
+        "head": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40,64}$" },
+        "accountHome": { "anyOf": [{ "$ref": "#/$defs/absolutePath" }, { "type": "null" }], "description": "The origin's account home (CLAUDE_CONFIG_DIR or CODEX_HOME) when one is set." }
+      },
+      "if": { "properties": { "family": { "const": "claude" } }, "required": ["family"] },
+      "then": { "properties": { "threadId": { "type": "string", "format": "uuid" } } }
+    },
+    "v2Worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "provider", "model", "effort", "agent", "resolvedRuntimeVersion"],
+      "properties": {
+        "family": { "$ref": "#/$defs/v2Family" },
+        "provider": { "enum": ["anthropic", "openai"] },
+        "model": { "type": ["string", "null"], "minLength": 1, "description": "Routed model selector, or null when the host configuration decides." },
+        "effort": { "type": ["string", "null"], "minLength": 1, "description": "Routed reasoning effort, or null when the host configuration decides." },
+        "agent": { "type": ["string", "null"], "minLength": 1 },
+        "resolvedRuntimeVersion": { "type": "string", "minLength": 1 },
+        "claude": { "$ref": "#/$defs/v2ClaudeWorker" },
+        "codex": { "$ref": "#/$defs/v2CodexWorker" }
+      },
+      "oneOf": [
+        { "properties": { "family": { "const": "claude" }, "provider": { "const": "anthropic" }, "claude": { "type": "object" }, "codex": false }, "required": ["claude"] },
+        { "properties": { "family": { "const": "codex" }, "provider": { "const": "openai" }, "codex": { "type": "object" }, "claude": false }, "required": ["codex"] }
+      ]
+    },
+    "v2ClaudeWorker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inlineAgents", "customAgentsFile", "pluginDirs", "mcpConfigPaths", "addDirs", "settingSources"],
+      "properties": {
+        "inlineAgents": { "type": ["object", "null"] },
+        "customAgentsFile": { "anyOf": [{ "$ref": "#/$defs/absolutePath" }, { "type": "null" }] },
+        "pluginDirs": { "$ref": "#/$defs/pathArray" },
+        "mcpConfigPaths": { "$ref": "#/$defs/pathArray" },
+        "addDirs": { "$ref": "#/$defs/pathArray" },
+        "settingSources": {
+          "description": "Setting sources passed as --setting-sources; null under the host profile, which passes none.",
+          "anyOf": [
+            { "type": "array", "uniqueItems": true, "items": { "enum": ["user", "project", "local"] } },
+            { "type": "null" }
+          ]
+        }
+      },
+      "oneOf": [
+        { "properties": { "inlineAgents": { "type": "object", "minProperties": 1 }, "customAgentsFile": { "type": "null" } } },
+        { "properties": { "inlineAgents": { "type": "null" }, "customAgentsFile": { "$ref": "#/$defs/absolutePath" } } },
+        { "properties": { "inlineAgents": { "type": "null" }, "customAgentsFile": { "type": "null" } } }
+      ]
+    },
+    "v2CodexWorker": { "type": "object", "additionalProperties": false },
+    "v2Execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile", "executor", "tmuxSession", "workspaceMode", "requestedWorkspacePath",
+        "canonicalWorkspacePath", "permittedRoot", "workerSessionId", "sandboxAttestation", "timeoutSeconds"
+      ],
+      "properties": {
+        "profile": { "$ref": "#/$defs/v2Profile" },
+        "executor": { "enum": ["tmux", "native-background"] },
+        "tmuxSession": { "type": ["string", "null"], "pattern": "^ccb-[A-Za-z0-9_-]+$" },
+        "workspaceMode": { "enum": ["current", "worktree"] },
+        "requestedWorkspacePath": { "$ref": "#/$defs/absolutePath" },
+        "canonicalWorkspacePath": { "$ref": "#/$defs/absolutePath" },
+        "permittedRoot": { "anyOf": [{ "$ref": "#/$defs/absolutePath" }, { "type": "null" }] },
+        "workerSessionId": { "type": ["string", "null"], "minLength": 1, "description": "Pre-assigned Claude session id; null for a Codex worker, whose thread id is read back after thread/start." },
+        "sandboxAttestation": { "anyOf": [{ "$ref": "#/$defs/sandboxAttestation" }, { "type": "null" }] },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "effectiveWorkerArgs": { "type": "array", "items": { "type": "string" }, "description": "Claude workers only: the exact permission arguments the profile passes." },
+        "effectiveWorkerParams": { "type": "object", "description": "Codex workers only: the exact thread parameters the profile passes." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "executor": { "const": "tmux" } }, "required": ["executor"] },
+          "then": { "properties": { "tmuxSession": { "type": "string", "pattern": "^ccb-[A-Za-z0-9_-]+$" } } },
+          "else": { "properties": { "tmuxSession": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "profile": { "const": "sandbox-autonomous" } }, "required": ["profile"] },
+          "then": { "properties": { "sandboxAttestation": { "$ref": "#/$defs/sandboxAttestation" } } },
+          "else": { "properties": { "sandboxAttestation": { "type": "null" } } }
+        }
+      ]
+    },
+    "v2ClaudeProfileMapping": {
+      "type": "object",
+      "required": ["profile", "effectiveWorkerArgs"],
+      "properties": {
+        "profile": { "$ref": "#/$defs/v2Profile" },
+        "effectiveWorkerArgs": { "type": "array", "items": { "type": "string" } },
+        "effectiveWorkerParams": false
+      },
+      "allOf": [
+        { "if": { "properties": { "profile": { "const": "host" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "properties": { "profile": { "const": "review-readonly" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "$ref": "#/$defs/reviewReadonlyArgs" } } } },
+        { "if": { "properties": { "profile": { "const": "standard" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "$ref": "#/$defs/standardArgs" } } } },
+        { "if": { "properties": { "profile": { "enum": ["trusted-autonomous", "sandbox-autonomous"] } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerArgs": { "$ref": "#/$defs/autonomousArgs" } } } }
+      ]
+    },
+    "v2CodexProfileMapping": {
+      "type": "object",
+      "required": ["profile", "effectiveWorkerParams"],
+      "properties": {
+        "profile": { "enum": ["host", "review-readonly", "trusted-autonomous"] },
+        "effectiveWorkerArgs": false,
+        "effectiveWorkerParams": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "profile": { "const": "host" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerParams": { "type": "object", "maxProperties": 0 } } } },
+        { "if": { "properties": { "profile": { "const": "review-readonly" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerParams": { "$ref": "#/$defs/v2CodexReadonlyParams" } } } },
+        { "if": { "properties": { "profile": { "const": "trusted-autonomous" } }, "required": ["profile"] }, "then": { "properties": { "effectiveWorkerParams": { "$ref": "#/$defs/v2CodexAutonomousParams" } } } }
+      ]
+    },
+    "v2CodexReadonlyParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox"],
+      "properties": { "sandbox": { "const": "read-only" } }
+    },
+    "v2CodexAutonomousParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox", "approvalPolicy"],
+      "properties": { "sandbox": { "const": "danger-full-access" }, "approvalPolicy": { "const": "never" } }
+    },
+    "v2Verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "profile"],
+      "properties": {
+        "family": { "$ref": "#/$defs/v2Family" },
+        "profile": { "$ref": "#/$defs/v2Profile" }
+      },
+      "allOf": [
+        { "if": { "properties": { "family": { "const": "codex" } }, "required": ["family"] }, "then": { "properties": { "profile": { "enum": ["host", "review-readonly", "trusted-autonomous"] } } } },
+        { "if": { "properties": { "family": { "const": "claude" } }, "required": ["family"] }, "then": { "properties": { "profile": { "enum": ["host", "review-readonly", "standard", "trusted-autonomous"] } } } }
+      ]
+    },
+    "v2Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["promptFile", "acceptance", "family", "continuesJobId"],
+      "properties": {
+        "promptFile": { "type": "string", "minLength": 1 },
+        "acceptance": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "family": { "anyOf": [{ "$ref": "#/$defs/v2TaskFamily" }, { "type": "null" }], "description": "Task family used for routing, for example review." },
+        "continuesJobId": { "anyOf": [{ "$ref": "#/$defs/jobId" }, { "type": "null" }] }
+      }
+    },
+    "v2Routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "reason"],
+      "properties": {
+        "source": { "enum": ["flag", "config", "extension", "host"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "warnings": {
+          "description": "Routing adjustments made after live discovery, for example an effort the resolved model does not support.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "model", "effort", "supported"],
+            "properties": {
+              "code": { "const": "effort-unsupported" },
+              "model": { "type": ["string", "null"], "minLength": 1 },
+              "effort": { "type": "string", "minLength": 1 },
+              "supported": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          }
+        }
+      }
     }
   }
 }

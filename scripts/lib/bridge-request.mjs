@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { validateBridgeRequestContract } from "./bridge-contracts.mjs";
-import { resolveBridgePolicy } from "./bridge-policy.mjs";
+import { BRIDGE_FAMILIES, resolveBridgePolicy, resolveFamilyProfile } from "./bridge-policy.mjs";
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const ALLOWED_EXECUTORS = new Set(["tmux", "native-background"]);
@@ -165,22 +165,15 @@ function deepFreeze(value) {
   return value;
 }
 
-export function buildBridgeRequest(options = {}) {
-  if (!options || typeof options !== "object" || Array.isArray(options)) {
-    fail("invalid_options", "options", "Bridge request options must be an object.");
-  }
-
-  const permittedRoot = options.permittedRoot === undefined || options.permittedRoot === null
+function resolvePermittedRoot(options) {
+  return options.permittedRoot === undefined || options.permittedRoot === null
     ? null
     : canonicalPath(options.permittedRoot, "permittedRoot", "directory");
-  const requestedWorkspacePath = requiredString(options.workspacePath, "workspacePath");
-  let policy;
+}
+
+function resolvePolicyOrFail(policyOptions) {
   try {
-    policy = resolveBridgePolicy({
-      profile: requiredString(options.profile, "profile"),
-      workspacePath: requestedWorkspacePath,
-      permittedRoot: permittedRoot ?? undefined
-    });
+    return resolveBridgePolicy(policyOptions);
   } catch (cause) {
     if (cause instanceof BridgeRequestError) throw cause;
     if (cause.message.includes("outside permittedRoot")) {
@@ -188,7 +181,9 @@ export function buildBridgeRequest(options = {}) {
     }
     fail("policy_invalid", "profile", cause.message, { cause });
   }
+}
 
+function resolveExecutionOptions(options) {
   const executor = requiredString(options.executor, "executor");
   if (!ALLOWED_EXECUTORS.has(executor)) fail("invalid_executor", "executor", `Unknown executor "${executor}".`);
   const workspaceMode = requiredString(options.workspace ?? options.workspaceMode, "workspace");
@@ -200,6 +195,58 @@ export function buildBridgeRequest(options = {}) {
   }
   const acceptance = asList(options.acceptance, "acceptance");
   if (acceptance.length === 0) fail("acceptance_required", "acceptance", "acceptance must contain at least one criterion.");
+  return { executor, workspaceMode, timeoutSeconds, acceptance };
+}
+
+function resolveOriginDirectories(options, permittedRoot) {
+  const canonicalCwd = constrainPath(canonicalPath(options.cwd, "cwd", "directory"), permittedRoot, "cwd");
+  const canonicalRepoRoot = constrainPath(canonicalPath(options.repoRoot, "repoRoot", "directory"), permittedRoot, "repoRoot");
+  const mcpConfigInput = options.mcpConfigs ?? options.mcpConfigPaths;
+  if (asList(mcpConfigInput, "mcpConfigs").some((entry) => entry.startsWith("{"))) {
+    fail("inline_mcp_config_forbidden", "mcpConfigs", "Inline MCP configuration is not persisted in bridge requests; provide configuration file paths.");
+  }
+  return { canonicalCwd, canonicalRepoRoot, mcpConfigInput };
+}
+
+function validateOrFail(request) {
+  try {
+    validateBridgeRequestContract(request);
+  } catch (cause) {
+    fail("contract_invalid", "request", cause.message, { cause });
+  }
+  return deepFreeze(request);
+}
+
+/**
+ * Build an immutable, contract-validated delegation request.
+ *
+ * Without `schemaVersion` (or with 1) this writes the 1.2.0 request from the 1.x
+ * options, unchanged. With `schemaVersion: 2` it writes a v2 request from the options
+ * `originFamily`, `threadId`, `turnId`, `accountHome`, `workerFamily`, `model`,
+ * `effort`, `routing`, `verificationFamily`, `verificationProfile`, `taskFamily` and
+ * `continuesJobId`, plus the 1.x workspace, executor, task and Claude worker options.
+ *
+ * @throws {BridgeRequestError} with a stable `code` and the offending `field`
+ */
+export function buildBridgeRequest(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    fail("invalid_options", "options", "Bridge request options must be an object.");
+  }
+  if (options.schemaVersion === undefined || options.schemaVersion === 1) return buildV1Request(options);
+  if (options.schemaVersion === 2) return buildV2Request(options);
+  return fail("invalid_schema_version", "schemaVersion", `Unsupported request schemaVersion ${JSON.stringify(options.schemaVersion)}; supported versions: 1, 2.`);
+}
+
+function buildV1Request(options) {
+  const permittedRoot = resolvePermittedRoot(options);
+  const requestedWorkspacePath = requiredString(options.workspacePath, "workspacePath");
+  const policy = resolvePolicyOrFail({
+    profile: requiredString(options.profile, "profile"),
+    workspacePath: requestedWorkspacePath,
+    permittedRoot: permittedRoot ?? undefined
+  });
+
+  const { executor, workspaceMode, timeoutSeconds, acceptance } = resolveExecutionOptions(options);
   const jobId = generateJobId();
   const agentSelection = resolveAgentSelection(options, permittedRoot);
   const settingSources = resolveSettingSources(options.settingSources);
@@ -208,12 +255,7 @@ export function buildBridgeRequest(options = {}) {
     settingSourcesArg,
     ...policy.claudeArgs.filter((argument) => argument !== "--setting-sources=")
   ];
-  const canonicalCwd = constrainPath(canonicalPath(options.cwd, "cwd", "directory"), permittedRoot, "cwd");
-  const canonicalRepoRoot = constrainPath(canonicalPath(options.repoRoot, "repoRoot", "directory"), permittedRoot, "repoRoot");
-  const mcpConfigInput = options.mcpConfigs ?? options.mcpConfigPaths;
-  if (asList(mcpConfigInput, "mcpConfigs").some((entry) => entry.startsWith("{"))) {
-    fail("inline_mcp_config_forbidden", "mcpConfigs", "Inline MCP configuration is not persisted in bridge requests; provide configuration file paths.");
-  }
+  const { canonicalCwd, canonicalRepoRoot, mcpConfigInput } = resolveOriginDirectories(options, permittedRoot);
 
   const request = {
     schemaVersion: 1,
@@ -256,10 +298,172 @@ export function buildBridgeRequest(options = {}) {
     }
   };
 
-  try {
-    validateBridgeRequestContract(request);
-  } catch (cause) {
-    fail("contract_invalid", "request", cause.message, { cause });
+  return validateOrFail(request);
+}
+
+// Options that only a Claude worker can use; a Codex worker has no equivalent.
+const CLAUDE_ONLY_OPTIONS = Object.freeze([
+  "agents", "agentsFile", "customAgentsFile", "pluginDirs", "mcpConfigs", "mcpConfigPaths", "addDirs", "settingSources"
+]);
+
+function isProvided(value) {
+  return value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0);
+}
+
+function familyOption(value, field) {
+  if (!BRIDGE_FAMILIES.includes(value)) {
+    fail("invalid_family", field, `${field} must be one of ${BRIDGE_FAMILIES.join(", ")}; got ${JSON.stringify(value ?? null)}.`);
   }
-  return deepFreeze(request);
+  return value;
+}
+
+function resolveVerification(options, workerFamily) {
+  const family = options.verificationFamily === undefined || options.verificationFamily === null
+    ? BRIDGE_FAMILIES.find((candidate) => candidate !== workerFamily)
+    : familyOption(options.verificationFamily, "verificationFamily");
+  if (family === workerFamily) {
+    fail("same_family_verification", "verificationFamily", `The verifier must be the other family than the ${workerFamily} worker.`);
+  }
+  const profile = options.verificationProfile === undefined || options.verificationProfile === null
+    ? "host"
+    : requiredString(options.verificationProfile, "verificationProfile");
+  try {
+    resolveFamilyProfile(profile, family);
+  } catch (cause) {
+    fail("policy_invalid", "verificationProfile", cause.message, { cause });
+  }
+  return { family, profile };
+}
+
+function resolveAccountHome(value) {
+  if (value === undefined || value === null) return null;
+  const accountHome = requiredString(value, "accountHome");
+  if (!path.isAbsolute(accountHome)) fail("path_not_absolute", "accountHome", "accountHome must be an absolute path.");
+  let stat;
+  try {
+    stat = fs.statSync(accountHome);
+  } catch (cause) {
+    fail("path_not_found", "accountHome", "accountHome must reference an existing directory.", { cause });
+  }
+  if (!stat.isDirectory()) fail("path_wrong_kind", "accountHome", "accountHome must reference an existing directory.");
+  // Recorded as given: it is matched against the CLAUDE_CONFIG_DIR or CODEX_HOME value later.
+  return accountHome;
+}
+
+function resolveRoutingOption(options, model, effort) {
+  if (options.routing === undefined || options.routing === null) {
+    return model !== null || effort !== null
+      ? { source: "flag", reason: "Explicit model or effort option." }
+      : { source: "host", reason: "No routing rule or flag; the host configuration decides model and effort." };
+  }
+  if (typeof options.routing !== "object" || Array.isArray(options.routing)) {
+    fail("invalid_routing", "routing", "routing must be an object with source, reason and, optionally, the warnings the routing resolver reported.");
+  }
+  return { ...options.routing };
+}
+
+function buildV2Request(options) {
+  const originFamily = familyOption(options.originFamily, "originFamily");
+  const workerFamily = familyOption(options.workerFamily, "workerFamily");
+  const claudeWorker = workerFamily === "claude";
+  const permittedRoot = resolvePermittedRoot(options);
+  const requestedWorkspacePath = requiredString(options.workspacePath, "workspacePath");
+  const profile = requiredString(options.profile, "profile");
+  const policy = resolvePolicyOrFail({
+    profile,
+    family: workerFamily,
+    workspacePath: requestedWorkspacePath,
+    permittedRoot: permittedRoot ?? undefined
+  });
+  const verification = resolveVerification(options, workerFamily);
+  if (!claudeWorker) {
+    const claudeOption = CLAUDE_ONLY_OPTIONS.find((name) => isProvided(options[name]));
+    if (claudeOption) {
+      fail("claude_option_for_codex_worker", claudeOption, `${claudeOption} applies only to a Claude worker; this request has a Codex worker.`);
+    }
+  } else if (profile === "host" && isProvided(options.settingSources)) {
+    fail("host_setting_sources", "settingSources", "The host profile passes no --setting-sources; choose a non-host profile to set setting sources.");
+  }
+
+  const { executor, workspaceMode, timeoutSeconds, acceptance } = resolveExecutionOptions(options);
+  const jobId = generateJobId();
+  const { canonicalCwd, canonicalRepoRoot, mcpConfigInput } = resolveOriginDirectories(options, permittedRoot);
+  const model = nullableString(options.model, "model");
+  const effort = nullableString(options.effort, "effort");
+
+  let workerBlock;
+  let workerSettings;
+  if (claudeWorker) {
+    const agentSelection = resolveAgentSelection(options, permittedRoot);
+    const settingSources = profile === "host" ? null : resolveSettingSources(options.settingSources);
+    workerBlock = {
+      claude: {
+        inlineAgents: agentSelection.inlineAgents,
+        customAgentsFile: agentSelection.customAgentsFile,
+        pluginDirs: canonicalPaths(options.pluginDirs, "pluginDirs", "directory", permittedRoot),
+        mcpConfigPaths: canonicalPaths(mcpConfigInput, "mcpConfigs", "file", permittedRoot),
+        addDirs: canonicalPaths(options.addDirs, "addDirs", "directory", permittedRoot),
+        settingSources
+      }
+    };
+    workerSettings = {
+      workerSessionId: crypto.randomUUID(),
+      effectiveWorkerArgs: settingSources === null
+        ? [...policy.workerArgs]
+        : [`--setting-sources=${settingSources.join(",")}`, ...policy.workerArgs.filter((argument) => argument !== "--setting-sources=")]
+    };
+  } else {
+    workerBlock = { codex: {} };
+    workerSettings = { workerSessionId: null, effectiveWorkerParams: { ...policy.workerParams } };
+  }
+  const agent = options.agent === undefined || options.agent === null ? null : requiredString(options.agent, "agent");
+
+  const request = {
+    schemaVersion: 2,
+    jobId,
+    origin: {
+      family: originFamily,
+      threadId: requiredString(options.threadId, "threadId"),
+      turnId: nullableString(options.turnId, "turnId"),
+      cwd: canonicalCwd,
+      repoRoot: canonicalRepoRoot,
+      branch: nullableString(options.branch, "branch"),
+      head: nullableString(options.head, "head"),
+      accountHome: resolveAccountHome(options.accountHome)
+    },
+    worker: {
+      family: workerFamily,
+      provider: claudeWorker ? "anthropic" : "openai",
+      model,
+      effort,
+      agent,
+      resolvedRuntimeVersion: requiredString(options.resolvedRuntimeVersion, "resolvedRuntimeVersion"),
+      ...workerBlock
+    },
+    execution: {
+      profile: policy.profile,
+      executor,
+      tmuxSession: executor === "tmux" ? `ccb-${jobId.slice(4)}` : null,
+      workspaceMode,
+      requestedWorkspacePath: policy.requestedWorkspacePath,
+      canonicalWorkspacePath: policy.canonicalWorkspacePath,
+      permittedRoot: policy.permittedRoot,
+      workerSessionId: workerSettings.workerSessionId,
+      sandboxAttestation: policy.sandboxAttestation,
+      timeoutSeconds,
+      ...(claudeWorker
+        ? { effectiveWorkerArgs: workerSettings.effectiveWorkerArgs }
+        : { effectiveWorkerParams: workerSettings.effectiveWorkerParams })
+    },
+    verification,
+    task: {
+      promptFile: requiredString(options.promptFile, "promptFile"),
+      acceptance,
+      family: nullableString(options.taskFamily, "taskFamily"),
+      continuesJobId: nullableString(options.continuesJobId, "continuesJobId")
+    },
+    routing: resolveRoutingOption(options, model, effort)
+  };
+
+  return validateOrFail(request);
 }
