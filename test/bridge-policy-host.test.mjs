@@ -98,6 +98,13 @@ test("v1 policy resolution is unchanged and refuses host", () => {
   assert.throws(() => resolveBridgePolicy({ profile: "host", workspacePath: ROOT }), /"host".*schemaVersion 2/);
 });
 
+test("profile names never resolve through the object prototype", () => {
+  for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+    assert.throws(() => resolveBridgePolicy({ profile: name, workspacePath: ROOT }), /Unknown bridge trust profile/, name);
+    assert.throws(() => resolveFamilyProfile(name, "claude"), /Unknown bridge profile/, name);
+  }
+});
+
 test("host refuses a contradictory permission mode", () => {
   assert.throws(
     () => resolveBridgePolicy({ profile: "host", workspacePath: ROOT, family: "claude", permissionMode: "default" }),
