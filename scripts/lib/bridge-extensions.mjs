@@ -8,9 +8,10 @@
 // An extension is ONE self-contained module. Its sha256 is the integrity signal a
 // recovered job compares, so it must cover the code the extension runs. The loader
 // imports exactly the bytes it hashed, as a module that has no location of its own:
-// a relative or package import fails when the extension loads, and only node:
-// modules can be imported by name. What the module system cannot refuse stays
-// outside the digest: an import by absolute file: URL, a dynamic import() and any
+// a relative or package import fails when the extension loads, and so does a static
+// import by absolute file: URL (the one refusal the module system does not make, so
+// the loader makes it from the source). Only node: modules can be imported by name.
+// What no loader can refuse stays outside the digest: a dynamic import() and any
 // other way an extension reads and runs other files. An extension that does that
 // owns the drift.
 
@@ -69,13 +70,19 @@ function validateDefinition(file, definition) {
   }
 }
 
-// The specifiers of an extension's static imports and re-exports, in source order. It only helps
-// word a message: the refusal itself comes from the module system. It reads statement starts, so a
-// commented-out import is skipped, and a dynamic import() is not listed.
+// The specifiers of an extension's static imports and re-exports, in source order. It reads
+// statement starts, so a commented-out import and import-like text inside a string are skipped, and
+// a dynamic import() is not listed. It words messages, and it backs the one refusal the module
+// system does not make itself (an absolute file: URL, see loadOne).
 const STATIC_IMPORT = /(?:^|[;{}\n])[ \t]*(?:import|export)\b(?:[^"'`;]*?\bfrom\b)?[ \t\r\n]*(["'])([^"'\r\n]+)\1/g;
 
 function staticImportSpecifiers(source) {
   return [...source.toString("utf8").matchAll(STATIC_IMPORT)].map((match) => match[2]);
+}
+
+function selfContainedViolation(file, specifier) {
+  return `Extension ${file} imports ${JSON.stringify(specifier)}; ` +
+    "an extension must be one self-contained module (import only node: modules), so its digest covers all the code it runs.";
 }
 
 /**
@@ -96,8 +103,7 @@ export function describeExtensionImportFailure(file, source, cause) {
     const shown = message.replace(/data:[^"'\s]+/g, "<module>").slice(0, 200);
     return `Extension ${file} failed to import: ${shown} (an extension must be one self-contained module; only node: modules may be imported)`;
   }
-  return `Extension ${file} imports ${JSON.stringify(specifier)}; ` +
-    "an extension must be one self-contained module (import only node: modules), so its digest covers all the code it runs.";
+  return selfContainedViolation(file, specifier);
 }
 
 async function loadOne(file) {
@@ -111,6 +117,10 @@ async function loadOne(file) {
     throw loadFailed(`Extension ${file} could not be read: ${cause.message}`, cause);
   }
   const sha256 = crypto.createHash("sha256").update(source).digest("hex");
+  // The module system refuses a relative or package import from the module built below, but it
+  // loads an import by absolute file: URL, which would put a helper outside the digest.
+  const fileImport = staticImportSpecifiers(source).find((specifier) => /^file:/i.test(specifier));
+  if (fileImport !== undefined) throw loadFailed(selfContainedViolation(file, fileImport));
   let module;
   try {
     // Import the bytes that were hashed, never the file again, so the digest identifies the code

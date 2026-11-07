@@ -92,8 +92,8 @@ test("a recovered job re-imports its extensions and reports a changed digest", a
 
 // The digest is the recovery integrity signal, so it must cover all the code an
 // extension runs. An extension is therefore one self-contained module: the loader
-// executes exactly the bytes it hashed, and a relative or package import fails closed
-// at load instead of leaving a helper outside the digest.
+// executes exactly the bytes it hashed, and a relative, package or file: URL import
+// fails closed at load instead of leaving a helper outside the digest.
 test("an extension is one self-contained module, so its digest covers all the code it runs", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-ext-split-"));
   fs.writeFileSync(path.join(dir, "helper.mjs"), `export const helper = () => "v1";`);
@@ -178,7 +178,7 @@ test("a static import by absolute file: URL is refused at load, like a relative 
   const notImports = writeExtension([
     `// import { nope } from ${JSON.stringify(url)};`,
     `const note = 'import { nope } from "${url}"';`,
-    `export default { apiVersion: 1, name: "plain", note };`
+    `export default { apiVersion: 1, name: "plain", observe() { return note; } };`
   ].join("\n"));
   const [plain] = await loadBridgeExtensions([notImports]);
   assert.equal(plain.name, "plain", "a commented-out import and import-like text inside a string are not imports");

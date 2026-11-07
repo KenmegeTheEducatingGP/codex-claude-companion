@@ -393,9 +393,9 @@ readable.
 - **Extensions.** Local modules listed by absolute path in the config file can
   route models, check a resolved model, pick an account home, add required
   verification checks and observe events. An extension is one self-contained
-  module (it may import `node:` modules only; a relative or package import fails
-  when it loads). Loading fails closed, and each module's sha256 is recorded, so
-  a recovered job reports a changed one.
+  module (it may import `node:` modules only; a relative, package or `file:` URL
+  import fails when it loads). Loading fails closed, and each module's sha256 is
+  recorded, so a recovered job reports a changed one.
 
 See [the migration contract](docs/bridge-migration.md) for the profile table,
 the config keys and the extension API.
