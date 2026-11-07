@@ -127,6 +127,21 @@ test("invalid config files fail closed with stable error codes", () => {
   );
 });
 
+test("a routing rule may leave the worker family to the host with null, as the schema description and the docs say", async () => {
+  const file = writeConfig({ schemaVersion: 1, routing: { review: { family: null, model: null, effort: "high" } } });
+  const loaded = loadBridgeConfig({ env: { CODEX_CLAUDE_CONFIG: file } });
+  assert.deepEqual(loaded.config.routing.review, { family: null, model: null, effort: "high" });
+  assert.deepEqual(
+    await resolveRouting(loaded.config, [], { request: null, taskFamily: "review" }),
+    { family: null, model: null, effort: "high", source: "config", reason: "config routing.review", warnings: [] }
+  );
+  // A name that is neither null nor a known family is still refused.
+  assert.throws(
+    () => loadBridgeConfig({ env: { CODEX_CLAUDE_CONFIG: writeConfig({ schemaVersion: 1, routing: { review: { family: "gemini" } } }) } }),
+    (error) => error instanceof BridgeConfigError && error.code === "config_invalid"
+  );
+});
+
 test("routing resolves through the config table, then extensions, else the host", async () => {
   const config = exampleConfig();
   const fromConfig = await resolveRouting(config, [], { request: null, taskFamily: "review" });
