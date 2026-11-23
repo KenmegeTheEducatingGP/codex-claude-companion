@@ -78,6 +78,6 @@
     "ajv-formats": "3.0.1"
   },
   "devDependencies": {
-    "fast-check": "4.10.2"
+    "fast-check": "4.10.3"
   }
 }
